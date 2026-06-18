@@ -1,0 +1,61 @@
+ACOMPANHAMENTO DE TESTES - TravellersRestAccess
+(Este arquivo é reescrito a cada rodada de testes/pedidos novos - preencha "r:" nos
+itens anteriores e eu releio tudo na próxima resposta)
+
+=====================================================
+RESPOSTA: bate-papo, tela cheia, dificuldade, vibração, etc.
+=====================================================
+
+Você fez a pergunta certa ("existem tantos níveis de tela cheia?") - a
+resposta é NÃO, e isso me ajudou a achar um bug maior que eu não tinha visto.
+
+Fui direto no código do jogo (não advinhei) e confirmei: TODAS essas opções
+abaixo são, de verdade, simples LIGA/DESLIGA (on/off) - nenhuma delas tem
+níveis de verdade:
+- Bate-papo (som do chat)
+- Tela cheia
+- Sincronia vertical (VSync)
+- Luzes piscando
+- Desafios mais fáceis
+- Código de convite visível
+- Vibração
+- Manter pressionado para correr
+- "Increase UI" (ainda não vi essa em português, deve aparecer em algum
+  lugar das Opções)
+
+O bug: meu código estava encontrando, por engano, um controle de volume que
+não tinha nada a ver, só porque ele estava "por perto" na estrutura da tela
+de algumas dessas opções - por isso apareciam como "level X of 10" em vez de
+ligado/desligado. CORRIGIDO: agora o mod sempre procura primeiro se existe um
+liga/desliga de verdade (em qualquer lugar próximo do botão) antes de
+considerar qualquer outra coisa, então todas essas opções devem voltar a
+falar "on"/"off" (ligado/desligado) corretamente, com Enter para alternar -
+não precisam mais do modo de ajuste com setas.
+
+Só Música e Efeitos Sonoros (que são volume de verdade, confirmados no
+código) continuam mostrando porcentagem com o modo de ajuste por setas.
+
+=====================================================
+PRÓXIMOS TESTES
+=====================================================
+
+Ative F12 e teste de novo, prestando atenção em:
+
+A) Bate-papo, Tela cheia, Vibração, Desafios mais fáceis, Código de convite
+   visível, Manter pressionado para correr, Sincronia vertical, Luzes
+   piscando - todos devem agora ler "on"/"off" e responder a Enter (não mais
+   "level X of 10").
+B) Música e Efeitos Sonoros continuam com o modo de ajuste por setas e
+   porcentagem, sem mudança.
+C) Resolução, Qualidade da água, Zoom da câmera - continuam com o modo de
+   ajuste, lendo o valor real (ex: "1920x1080").
+D) Veja se aparece alguma opção chamada algo como "Aumentar UI" / "Increase
+   UI" e me diga o nome real em português, para eu confirmar que peguei a
+   certa.
+
+Os pontos já confirmados como OK (Next/Previous sumiram da lista, abas
+isoladas, Música/Efeitos como item único) não precisam ser testados de novo
+a menos que algo pareça ter regredido.
+
+Quando terminar, "testei" como sempre - vamos continuar iterando até ficar
+bom.

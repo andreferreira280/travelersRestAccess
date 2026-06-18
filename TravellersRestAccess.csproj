@@ -1,0 +1,77 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+
+    <AssemblyName>TravellersRestAccess</AssemblyName>
+    <RootNamespace>TravellersRestAccess</RootNamespace>
+  </PropertyGroup>
+
+  <!-- Decompiled/template files are excluded from the build -->
+  <ItemGroup>
+    <Compile Remove="decompiled\**" />
+    <Compile Remove="templates\**" />
+  </ItemGroup>
+
+  <!-- MelonLoader references (net35 runtime folder) -->
+  <ItemGroup>
+    <Reference Include="MelonLoader">
+      <HintPath>C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\MelonLoader\net35\MelonLoader.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\MelonLoader\net35\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Unity references (from the game's Managed folder) -->
+  <ItemGroup>
+    <Reference Include="UnityEngine">
+      <HintPath>C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\TravellersRest_Data\Managed\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\TravellersRest_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\TravellersRest_Data\Managed\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\TravellersRest_Data\Managed\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\TravellersRest_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\TravellersRest_Data\Managed\UnityEngine.UIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\TravellersRest_Data\Managed\Unity.TextMeshPro.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Game assembly -->
+  <ItemGroup>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\TravellersRest_Data\Managed\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- After build: copy DLL to the game's Mods folder -->
+  <Target Name="CopyToMods" AfterTargets="Build">
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\Mods\" />
+    <Message Text="Copied $(TargetFileName) to Mods folder" Importance="High" />
+  </Target>
+
+</Project>
