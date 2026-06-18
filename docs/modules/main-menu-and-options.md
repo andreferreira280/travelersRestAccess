@@ -174,6 +174,16 @@ navegação normal da lista (setas cima/baixo, outros Enters) fica pausada.
   padrão consistente do mod.
 - Existe um `increaseUIToggle` no código (`OthersMenuUI`) que ainda não
   identificamos pelo nome em português na tela.
+- **PENDENTE - confirmar que os toggles de efeito de tela realmente mudam o
+  jogo de verdade**, não só o estado lido pelo mod: Tela cheia, Sincronia
+  vertical (VSync), Luzes piscando. O Enter/anúncio "on/off" funciona, mas
+  ainda não validamos visualmente (OCR ou observação do usuário) que o
+  efeito em tela muda junto.
+- **PENDENTE - Atribuir Teclas (`KeybindUI`) e atribuição de controle
+  (gamepad)**: ainda não trabalhamos de verdade nessa aba além de
+  confirmar que ela abre e isola corretamente. Falta: testar reatribuir
+  uma tecla/botão, e investigar o item "Keybind Element..." sem nome
+  (ver item acima).
 
 ## Como testar este módulo
 
