@@ -26,20 +26,30 @@
 
 ## Current Focus
 
-- **Active feature:** Main Menu + Options (feature-plan.md items 2 and the
-  "Settings/Options" rough feature) - see
-  `docs/modules/main-menu-and-options.md` for full details on what's
-  implemented, how it works, and open questions.
-- **Branch:** `feature/mainMenu` (tracks `origin/feature/mainMenu`).
+- **Done (merged to main):** Main Menu + Options (feature-plan.md item 2
+  and the "Settings/Options" rough feature) - see
+  `docs/modules/main-menu-and-options.md`. A few items still pending
+  validation there (screen-effect toggles, Keybind tab) but the feature is
+  stable enough to build on.
+- **Active feature:** New Game setup (Character Creator + whatever screens
+  appear between "Novo" and gameplay actually starting) - see
+  `docs/modules/new-game-setup.md`. Just started, mostly unexplored.
+- **Branch:** `feature/newGame` (tracks `origin/feature/newGame`), branched
+  from `main` after `feature/mainMenu` was merged in (fast-forward, no
+  conflicts).
 - **Live test loop:** see `novo_pedido.txt` at project root for the latest
   round of test feedback and next steps - rewritten after every test round.
 - Commit only when the user explicitly says a version is ready to commit.
+  Branch workflow: finish a feature -> merge to `main` -> branch the next
+  feature from `main`, to keep `main` current and avoid long-lived
+  diverging branches.
 
 ## Module Docs
 
 - `docs/modules/main-menu-and-options.md` - Title Screen, "Jogar"/SaveUI,
-  Options (all 4 tabs). Read this before touching `KeyboardUINavigator.cs`,
-  `MenuAnnouncer.cs`, or `UITextExtractor.cs`.
+  Options (all 4 tabs). Done/stable.
+- `docs/modules/new-game-setup.md` - Character Creator and first
+  new-game screens. In progress.
 - (Add one file per feature/module here as new ones start, e.g.
   `docs/modules/tutorial.md`, `docs/modules/inventory.md`.)
 
