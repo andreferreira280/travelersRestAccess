@@ -58,6 +58,14 @@ Patterns: `docs/ACCESSIBILITY_MODDING_GUIDE.md`
 - `docs/menu-accessibility-checklist.md` - Menu implementation checklist
 - `docs/game-api.md` - Keys, methods, documented patterns
 - `docs/feature-plan.md` - Feature catalog and priority order
-- `project_status.md` - Current setup/progress status
+- `docs/modules/` - Per-feature continuity notes (architecture, status, decisions, open questions). Read the relevant one before touching that feature's code; add/update one per feature.
+- `project_status.md` - Current setup/progress status, points to the active module doc
+- `novo_pedido.txt` - Latest test-round feedback loop with the user (rewritten every round)
 - `templates/` - Code templates
 - `scripts/` - PowerShell helper scripts
+
+## Git Workflow
+
+- Repo already initialized with remote `origin` (GitHub: andreferreira280/travelersRestAccess), branch `feature/mainMenu`.
+- Only commit when the user explicitly says a version is ready (e.g. "temos uma versão commitável"). Never commit proactively.
+- Confirm with the user before pushing to the remote.

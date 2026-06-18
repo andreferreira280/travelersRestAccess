@@ -239,6 +239,7 @@ namespace TravellersRestAccess
             var optionsMenu = topWindow as OptionsMenuUI;
             SoundMenuUI soundMenu = null;
             GraphicsMenuUI graphicsMenu = null;
+            OthersMenuUI othersMenu = null;
             if (optionsMenu != null)
             {
                 if (optionsMenu != _trackedOptionsMenu || justOpened)
@@ -251,6 +252,7 @@ namespace TravellersRestAccess
                 {
                     soundMenu = optionsMenu.panelsUI.OfType<SoundMenuUI>().FirstOrDefault();
                     graphicsMenu = optionsMenu.panelsUI.OfType<GraphicsMenuUI>().FirstOrDefault();
+                    othersMenu = optionsMenu.panelsUI.OfType<OthersMenuUI>().FirstOrDefault();
 
                     var selectedPanel = optionsMenu.panelsUI.FirstOrDefault(p => p != null && p.GetType() == _selectedOptionsPanelType);
                     if (selectedPanel != null && selectedPanel.content != null)
@@ -325,7 +327,7 @@ namespace TravellersRestAccess
                         multiNext = multiSelection.Find("NextButton")?.GetComponent<Button>();
                         if (multiPrev != null && multiNext != null)
                         {
-                            multiValueReader = BuildMultiSelectValueReader(selectable.gameObject.name, graphicsMenu)
+                            multiValueReader = BuildMultiSelectValueReader(selectable.gameObject.name, graphicsMenu, othersMenu)
                                 ?? (() => UITextExtractor.GetReadableText(selectable.gameObject));
                         }
                     }
@@ -347,16 +349,15 @@ namespace TravellersRestAccess
         }
 
         // The current-value TextMeshProUGUI for a Previous/Next row isn't a child of the row
-        // itself - it's a separate field on GraphicsMenuUI - so we match it by row name.
-        private Func<string> BuildMultiSelectValueReader(string rowName, GraphicsMenuUI graphicsMenu)
+        // itself - it's a separate field on the panel script - so we match it by row name.
+        private Func<string> BuildMultiSelectValueReader(string rowName, GraphicsMenuUI graphicsMenu, OthersMenuUI othersMenu)
         {
-            if (graphicsMenu == null) return null;
-
             switch (rowName)
             {
-                case "Resolution": return () => UITextExtractor.GetReadableText(graphicsMenu.resolutionText);
-                case "Quality": return () => UITextExtractor.GetReadableText(graphicsMenu.qualityText);
-                case "CameraZoom": return () => UITextExtractor.GetReadableText(graphicsMenu.zoomText);
+                case "Resolution": return graphicsMenu != null ? () => UITextExtractor.GetReadableText(graphicsMenu.resolutionText) : null;
+                case "Quality": return graphicsMenu != null ? () => UITextExtractor.GetReadableText(graphicsMenu.qualityText) : null;
+                case "CameraZoom": return graphicsMenu != null ? () => UITextExtractor.GetReadableText(graphicsMenu.zoomText) : null;
+                case "Language": return othersMenu != null ? () => UITextExtractor.GetReadableText(othersMenu.languageText) : null;
                 default: return null;
             }
         }

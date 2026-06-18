@@ -24,7 +24,26 @@
 - [x] Basic mod framework (Phase 2) - builds successfully, DLL auto-copied to game's Mods folder
 - [x] Verified in-game: "TravellersRestAccess loaded" announced via NVDA
 
-## Next Steps
+## Current Focus
+
+- **Active feature:** Main Menu + Options (feature-plan.md items 2 and the
+  "Settings/Options" rough feature) - see
+  `docs/modules/main-menu-and-options.md` for full details on what's
+  implemented, how it works, and open questions.
+- **Branch:** `feature/mainMenu` (tracks `origin/feature/mainMenu`).
+- **Live test loop:** see `novo_pedido.txt` at project root for the latest
+  round of test feedback and next steps - rewritten after every test round.
+- Commit only when the user explicitly says a version is ready to commit.
+
+## Module Docs
+
+- `docs/modules/main-menu-and-options.md` - Title Screen, "Jogar"/SaveUI,
+  Options (all 4 tabs). Read this before touching `KeyboardUINavigator.cs`,
+  `MenuAnnouncer.cs`, or `UITextExtractor.cs`.
+- (Add one file per feature/module here as new ones start, e.g.
+  `docs/modules/tutorial.md`, `docs/modules/inventory.md`.)
+
+## Original Setup Next Steps (completed, kept for history)
 
 1. Read `docs/ACCESSIBILITY_MODDING_GUIDE.md` completely
 2. Run codebase analysis (Phase 1 in `docs/setup-guide.md`): namespaces, singletons, input system, UI system, game mechanics, tutorial

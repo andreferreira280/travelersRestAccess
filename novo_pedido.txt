@@ -3,59 +3,58 @@ ACOMPANHAMENTO DE TESTES - TravellersRestAccess
 itens anteriores e eu releio tudo na próxima resposta)
 
 =====================================================
-RESPOSTA: bate-papo, tela cheia, dificuldade, vibração, etc.
+RESPOSTAS DESTA RODADA
 =====================================================
 
-Você fez a pergunta certa ("existem tantos níveis de tela cheia?") - a
-resposta é NÃO, e isso me ajudou a achar um bug maior que eu não tinha visto.
+1. Idiomas não lidos no item "Idioma (Tradução da Comunidade)":
+   Achei a causa: esse item usa o mesmo mecanismo de "anterior/próximo" que
+   Resolução/Qualidade, mas eu só tinha ensinado o mod a ler o valor real
+   (o nome do idioma) para Resolução/Qualidade/Zoom - para Idioma eu ainda
+   não tinha mapeado onde o jogo guarda o texto do idioma atual. CORRIGIDO:
+   agora ele também lê o nome real do idioma ao trocar com as setas.
 
-Fui direto no código do jogo (não advinhei) e confirmei: TODAS essas opções
-abaixo são, de verdade, simples LIGA/DESLIGA (on/off) - nenhuma delas tem
-níveis de verdade:
-- Bate-papo (som do chat)
-- Tela cheia
-- Sincronia vertical (VSync)
-- Luzes piscando
-- Desafios mais fáceis
-- Código de convite visível
-- Vibração
-- Manter pressionado para correr
-- "Increase UI" (ainda não vi essa em português, deve aparecer em algum
-  lugar das Opções)
+2. "Keybind Element Keyboard(Clone) (16 of 44)" sem nome em Atribuir Teclas:
+   Isso é uma tecla (ou slot de tecla) que não tem nenhum texto próprio
+   ainda - provavelmente uma tecla não atribuída, ou um slot pensado para
+   controle (gamepad) que não se aplica ao teclado. Vou deixar isso anotado
+   para quando chegarmos de fato na feature de Atribuir Teclas (ainda não é
+   nosso foco atual) - se quiser, posso investigar agora também, só me avise.
 
-O bug: meu código estava encontrando, por engano, um controle de volume que
-não tinha nada a ver, só porque ele estava "por perto" na estrutura da tela
-de algumas dessas opções - por isso apareciam como "level X of 10" em vez de
-ligado/desligado. CORRIGIDO: agora o mod sempre procura primeiro se existe um
-liga/desliga de verdade (em qualquer lugar próximo do botão) antes de
-considerar qualquer outra coisa, então todas essas opções devem voltar a
-falar "on"/"off" (ligado/desligado) corretamente, com Enter para alternar -
-não precisam mais do modo de ajuste com setas.
+3. Combinado: vou te avisar se parecer que o F12 não foi ativado num teste
+   (vou checar pelo log se não tiver certeza).
 
-Só Música e Efeitos Sonoros (que são volume de verdade, confirmados no
-código) continuam mostrando porcentagem com o modo de ajuste por setas.
+4. Documentação por módulo / checkpoints / git:
+   - Criei `docs/modules/main-menu-and-options.md` com tudo que descobrimos
+     até agora sobre Menu Principal e Opções: como cada parte funciona
+     (estrutura real do jogo), decisões que tomamos e por quê, e perguntas
+     ainda abertas. Vou manter esse arquivo atualizado conforme avançamos
+     nesse módulo, e criar um novo arquivo desses para cada próxima feature
+     (Tutorial, Inventário, etc.) - assim, mesmo numa conversa nova, dá pra
+     retomar lendo só esse arquivo.
+   - Atualizei `project_status.md` para apontar pra esse módulo e indicar
+     que estamos na feature de Menu Principal/Opções.
+   - Sobre acesso ao git: você já tem um repositório git configurado nesta
+     pasta, com um repositório remoto no GitHub já conectado
+     (andreferreira280/travelersRestAccess), na branch "feature/mainMenu".
+     Eu já consigo rodar comandos git diretamente (incluindo commit) - não
+     preciso de nenhum acesso extra. Só vou COMMITAR quando você disser que
+     está pronto (como você pediu), e vou confirmar com você antes de
+     enviar (push) para o GitHub, já que isso afeta o repositório remoto.
 
 =====================================================
 PRÓXIMOS TESTES
 =====================================================
 
-Ative F12 e teste de novo, prestando atenção em:
+Ative F12 e confirme:
 
-A) Bate-papo, Tela cheia, Vibração, Desafios mais fáceis, Código de convite
+A) Idioma agora lê o nome real do idioma ao trocar com as setas?
+B) Bate-papo, Tela cheia, Vibração, Desafios mais fáceis, Código de convite
    visível, Manter pressionado para correr, Sincronia vertical, Luzes
-   piscando - todos devem agora ler "on"/"off" e responder a Enter (não mais
-   "level X of 10").
-B) Música e Efeitos Sonoros continuam com o modo de ajuste por setas e
-   porcentagem, sem mudança.
-C) Resolução, Qualidade da água, Zoom da câmera - continuam com o modo de
-   ajuste, lendo o valor real (ex: "1920x1080").
-D) Veja se aparece alguma opção chamada algo como "Aumentar UI" / "Increase
-   UI" e me diga o nome real em português, para eu confirmar que peguei a
-   certa.
+   piscando - todos lendo "on"/"off" corretamente (resultado da rodada
+   anterior, só confirmando que ficou estável).
+C) Sinta-se livre para explorar mais fundo em Atribuir Teclas se quiser, ou
+   podemos deixar essa aba para uma rodada dedicada só a ela.
 
-Os pontos já confirmados como OK (Next/Previous sumiram da lista, abas
-isoladas, Música/Efeitos como item único) não precisam ser testados de novo
-a menos que algo pareça ter regredido.
-
-Quando terminar, "testei" como sempre - vamos continuar iterando até ficar
-bom.
+Quando terminar, "testei" como sempre.
+está tudo ok, então commite e vamos depois de vc commitar vamos para outra feature. commite e deixe nas anotações da feature que falta ainda confirmar que tudo realmente está sendo alterado principalmente em relação de efeeitos de tela e falta a gente ainda mexer nas configurações das teclas e atribuições de controles.
+Depois de commitar crie uma nova feature a feature/newGame onde vamos para a configurações e primeiras telas de inicio de jogo. Outra coisa se for preciso vc acha melhor ja mergear com a main? tenho medo das branches de feature darem conflito na main.
