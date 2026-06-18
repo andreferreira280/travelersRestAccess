@@ -32,3 +32,6 @@ Thumbs.db
 # Local working files (not for distribution)
 forum-post.txt
 *.local.*
+
+# Live test-feedback scratch file (rewritten every test round, not for history)
+novo_pedido.txt
