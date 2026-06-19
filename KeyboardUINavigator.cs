@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using TMPro;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
@@ -29,7 +30,18 @@ namespace TravellersRestAccess
             public Button MultiSelectPrev;
             public Button MultiSelectNext;
             public Func<string> MultiSelectValueReader;
+            public Func<bool> SelectedStateReader;
+            public string ActivationAnnouncement;
+            public Func<string> LabelReader;
         }
+
+        // CharacterCreatorUI's gender highlight images (maleFocused/femaleFocused) are
+        // private fields with no public accessor - read via reflection so we can announce
+        // which one is currently selected, the same way ToggleButton rows do.
+        private static readonly System.Reflection.FieldInfo CharacterCreatorMaleFocusedField =
+            typeof(CharacterCreatorUI).GetField("maleFocused", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        private static readonly System.Reflection.FieldInfo CharacterCreatorFemaleFocusedField =
+            typeof(CharacterCreatorUI).GetField("femaleFocused", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
 
         private static readonly Dictionary<string, Type> OptionsTabPanelTypes = new Dictionary<string, Type>
         {
@@ -42,6 +54,7 @@ namespace TravellersRestAccess
         private const float StabilizeDelay = 0.25f;
 
         private List<NavItem> _items = new List<NavItem>();
+        public int ItemCount => _items.Count;
         private List<NavItem> _pendingItems;
         private float _pendingSince;
         private bool _pendingIsFirstForOpen;
@@ -60,17 +73,46 @@ namespace TravellersRestAccess
         private Action _adjustingRight;
         private Func<string> _adjustingValueReader;
 
+        // Real Unity focus is required for text fields (the game checks .isFocused), unlike
+        // button navigation where we ignore native focus entirely. While editing, we step
+        // aside and let Unity's own TMP_InputField handle every key except Enter/Escape.
+        private TMP_InputField _editingInputField;
+
+        // Opening a popup on top of a window (e.g. the color picker over Character
+        // Creator) can leave MainUI.IsAnyUIOpen reporting false for a single frame while
+        // windows swap - without this debounce, that one frame was wiping our whole list
+        // and resetting the cursor to the top item once the popup closed.
+        private const float ClosedDebounceDelay = 0.15f;
+        private float? _closedSince;
+
+        // Remembers, per window, which item had the cursor right before we left it for a
+        // different window (e.g. opening the color picker over Character Creator) - so when
+        // we come back, the cursor returns there instead of resetting to the first item.
+        private UIWindow _lastTopWindow;
+        private readonly Dictionary<UIWindow, Selectable> _rememberedAnchors = new Dictionary<UIWindow, Selectable>();
+
         public void Update()
         {
             bool anyOpen = MainUI.IsAnyUIOpen(1);
 
             if (!anyOpen)
             {
+                if (_closedSince == null) _closedSince = Time.unscaledTime;
+                if (Time.unscaledTime - _closedSince.Value < ClosedDebounceDelay) return;
+
                 _wasOpen = false;
                 _items.Clear();
                 _pendingItems = null;
                 _currentIndex = -1;
                 _adjustingActive = false;
+                _editingInputField = null;
+                return;
+            }
+            _closedSince = null;
+
+            if (_editingInputField != null)
+            {
+                UpdateEditingInputField();
                 return;
             }
 
@@ -78,6 +120,16 @@ namespace TravellersRestAccess
             {
                 UpdateAdjusting();
                 return;
+            }
+
+            var topWindowNow = GetTopWindow();
+            if (topWindowNow != _lastTopWindow)
+            {
+                if (_lastTopWindow != null && _currentIndex >= 0 && _currentIndex < _items.Count)
+                {
+                    _rememberedAnchors[_lastTopWindow] = _items[_currentIndex].Anchor;
+                }
+                _lastTopWindow = topWindowNow;
             }
 
             var freshItems = CollectItems(justOpened: !_wasOpen);
@@ -115,11 +167,18 @@ namespace TravellersRestAccess
 
             if (_items.Count == 0) return;
 
-            if (Input.GetKeyDown(KeyCode.DownArrow))
+            // The color picker lays its swatches out horizontally, and the user asked for
+            // Left/Right to move between them there specifically (every other screen still
+            // uses Up/Down).
+            bool isColorPicker = topWindowNow is ColorPickerUI;
+            KeyCode nextKey = isColorPicker ? KeyCode.RightArrow : KeyCode.DownArrow;
+            KeyCode prevKey = isColorPicker ? KeyCode.LeftArrow : KeyCode.UpArrow;
+
+            if (Input.GetKeyDown(nextKey))
             {
                 Move(1);
             }
-            else if (Input.GetKeyDown(KeyCode.UpArrow))
+            else if (Input.GetKeyDown(prevKey))
             {
                 Move(-1);
             }
@@ -129,22 +188,36 @@ namespace TravellersRestAccess
             }
         }
 
+        private void UpdateEditingInputField()
+        {
+            // Everything else (letters, backspace, etc.) goes straight to Unity's own
+            // TMP_InputField handling, since it now has real EventSystem focus.
+            if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter) || Input.GetKeyDown(KeyCode.Escape))
+            {
+                string finalText = _editingInputField.text;
+                _editingInputField.DeactivateInputField();
+                DebugLogger.LogInput(Input.GetKeyDown(KeyCode.Escape) ? "Escape" : "Enter", "Confirm text edit");
+                _editingInputField = null;
+                ScreenReader.Announce(string.IsNullOrEmpty(finalText) ? "Vazio" : finalText);
+            }
+        }
+
         private void UpdateAdjusting()
         {
             if (Input.GetKeyDown(KeyCode.LeftArrow))
             {
                 _adjustingLeft();
-                ScreenReader.Announce($"{_adjustingLabel}: {_adjustingValueReader()}");
+                ScreenReader.Announce(FormatLabelValue(_adjustingLabel, _adjustingValueReader()));
             }
             else if (Input.GetKeyDown(KeyCode.RightArrow))
             {
                 _adjustingRight();
-                ScreenReader.Announce($"{_adjustingLabel}: {_adjustingValueReader()}");
+                ScreenReader.Announce(FormatLabelValue(_adjustingLabel, _adjustingValueReader()));
             }
             else if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter)
                 || Input.GetKeyDown(KeyCode.Space) || Input.GetKeyDown(KeyCode.Escape))
             {
-                ScreenReader.Announce($"{_adjustingLabel}: {_adjustingValueReader()} confirmed");
+                ScreenReader.Announce($"{FormatLabelValue(_adjustingLabel, _adjustingValueReader())} confirmed");
                 DebugLogger.LogState($"Adjust confirmed: {_adjustingLabel} = {_adjustingValueReader()}");
                 _adjustingActive = false;
             }
@@ -157,7 +230,15 @@ namespace TravellersRestAccess
             _adjustingLeft = onLeft;
             _adjustingRight = onRight;
             _adjustingValueReader = readValue;
-            ScreenReader.Announce($"Adjusting {label}: {readValue()}. Left and right to adjust, Enter or Escape to confirm.");
+            ScreenReader.Announce($"Adjusting {FormatLabelValue(label, readValue())}. Left and right to adjust, Enter or Escape to confirm.");
+        }
+
+        // Some rows (Character Creator's body parts) have no separate label - the anchor is
+        // the PreviousButton itself, and its own value text already says what it is (e.g.
+        // "Olhos 1"), so prefixing it with the humanized button name would be redundant.
+        private static string FormatLabelValue(string label, string value)
+        {
+            return string.IsNullOrEmpty(label) ? value : $"{label}: {value}";
         }
 
         private void Commit(List<NavItem> items, bool interrupt = true)
@@ -168,6 +249,13 @@ namespace TravellersRestAccess
             _items = items;
 
             int preservedIndex = previousAnchor != null ? _items.FindIndex(i => i.Anchor == previousAnchor) : -1;
+
+            if (preservedIndex < 0 && _lastTopWindow != null && _rememberedAnchors.TryGetValue(_lastTopWindow, out var remembered))
+            {
+                preservedIndex = _items.FindIndex(i => i.Anchor == remembered);
+                _rememberedAnchors.Remove(_lastTopWindow);
+            }
+
             _currentIndex = preservedIndex >= 0 ? preservedIndex : (_items.Count > 0 ? 0 : -1);
 
             DebugLogger.LogState($"Menu items refreshed: {_items.Count} found");
@@ -221,10 +309,15 @@ namespace TravellersRestAccess
             return string.Join("/", names);
         }
 
-        private List<NavItem> CollectItems(bool justOpened)
+        private UIWindow GetTopWindow()
         {
             var openWindows = MainUI.GetCurrentOpenWindows(1);
-            UIWindow topWindow = (openWindows != null && openWindows.Count > 0) ? openWindows.Last.Value : null;
+            return (openWindows != null && openWindows.Count > 0) ? openWindows.Last.Value : null;
+        }
+
+        private List<NavItem> CollectItems(bool justOpened)
+        {
+            UIWindow topWindow = GetTopWindow();
 
             if (topWindow == null)
             {
@@ -237,6 +330,7 @@ namespace TravellersRestAccess
             if (topWindow.content != null) rootGroups.Add((topWindow.content, 0));
 
             var optionsMenu = topWindow as OptionsMenuUI;
+            var characterCreator = topWindow as CharacterCreatorUI;
             SoundMenuUI soundMenu = null;
             GraphicsMenuUI graphicsMenu = null;
             OthersMenuUI othersMenu = null;
@@ -323,6 +417,8 @@ namespace TravellersRestAccess
                     var multiSelection = selectable.transform.Find("MultiSelection");
                     if (multiSelection != null)
                     {
+                        // Options-style: the row itself is a Selectable wrapping a
+                        // "MultiSelection" child that holds Previous/Next.
                         multiPrev = multiSelection.Find("PreviousButton")?.GetComponent<Button>();
                         multiNext = multiSelection.Find("NextButton")?.GetComponent<Button>();
                         if (multiPrev != null && multiNext != null)
@@ -331,6 +427,51 @@ namespace TravellersRestAccess
                                 ?? (() => UITextExtractor.GetReadableText(selectable.gameObject));
                         }
                     }
+                    else if (selectable.gameObject.name == "PreviousButton")
+                    {
+                        // Character Creator style: PreviousButton/NextButton are siblings of
+                        // each other (no wrapping "MultiSelection" object), with a separate
+                        // sibling label holding the current value (e.g. "Olhos 1").
+                        var rowParent = selectable.transform.parent;
+                        var siblingNext = rowParent?.Find("NextButton")?.GetComponent<Button>();
+                        if (siblingNext != null)
+                        {
+                            multiPrev = selectable.GetComponent<Button>();
+                            multiNext = siblingNext;
+                            var rowLabel = rowParent.GetComponentsInChildren<TextMeshProUGUI>(includeInactive: false)
+                                .FirstOrDefault(t => !string.IsNullOrWhiteSpace(t.text));
+                            multiValueReader = rowLabel != null ? () => UITextExtractor.GetReadableText(rowLabel) : null;
+                        }
+                    }
+                }
+
+                Func<bool> selectedStateReader = null;
+                string activationAnnouncement = null;
+                Func<string> labelReader = null;
+
+                if (characterCreator != null)
+                {
+                    if (selectable.gameObject.name == "Male")
+                    {
+                        selectedStateReader = () => IsGenderFocused(characterCreator, CharacterCreatorMaleFocusedField);
+                    }
+                    else if (selectable.gameObject.name == "Female")
+                    {
+                        selectedStateReader = () => IsGenderFocused(characterCreator, CharacterCreatorFemaleFocusedField);
+                    }
+                    else if (selectable.transform.parent != null && selectable.transform.parent.name == "Random")
+                    {
+                        activationAnnouncement = "Personagem aleatório";
+                    }
+                    else if (selectable.gameObject.name == "ButtonLeft")
+                    {
+                        activationAnnouncement = "Girando visualização";
+                    }
+                }
+
+                if (selectable.GetComponent<ColorButton>() != null)
+                {
+                    labelReader = () => DescribeColor(selectable);
                 }
 
                 result.Add(new NavItem
@@ -342,10 +483,87 @@ namespace TravellersRestAccess
                     MultiSelectPrev = multiPrev,
                     MultiSelectNext = multiNext,
                     MultiSelectValueReader = multiValueReader,
+                    SelectedStateReader = selectedStateReader,
+                    ActivationAnnouncement = activationAnnouncement,
+                    LabelReader = labelReader,
                 });
             }
 
             return result;
+        }
+
+        private static bool IsGenderFocused(CharacterCreatorUI characterCreator, System.Reflection.FieldInfo focusedImageField)
+        {
+            var image = focusedImageField?.GetValue(characterCreator) as Image;
+            if (image == null) return false;
+            // SetMaleGender()/SetFemaleGender() paint the selected side's image full white
+            // and the other side gray (confirmed in decompiled source) - no other state flag.
+            return image.color.r > 0.9f && image.color.g > 0.9f && image.color.b > 0.9f;
+        }
+
+        private static readonly (string name, Color color)[] NamedColors =
+        {
+            ("vermelho", new Color(1f, 0f, 0f)),
+            ("verde", new Color(0f, 1f, 0f)),
+            ("azul", new Color(0f, 0f, 1f)),
+            ("amarelo", new Color(1f, 1f, 0f)),
+            ("laranja", new Color(1f, 0.5f, 0f)),
+            ("roxo", new Color(0.5f, 0f, 0.5f)),
+            ("rosa", new Color(1f, 0.75f, 0.8f)),
+            ("marrom", new Color(0.4f, 0.26f, 0.13f)),
+            ("preto", new Color(0f, 0f, 0f)),
+            ("branco", new Color(1f, 1f, 1f)),
+            ("cinza", new Color(0.5f, 0.5f, 0.5f)),
+            ("ciano", new Color(0f, 1f, 1f)),
+        };
+
+        private static readonly System.Reflection.FieldInfo ColorButtonMaterialField =
+            typeof(ColorButton).GetField("_material", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        private static readonly System.Reflection.FieldInfo ColorButtonSpriteColorField =
+            typeof(ColorButton).GetField("_spriteColor", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+        // The game has no name for each color swatch - this approximates one from the
+        // underlying color value (nearest match in a small fixed palette), since exact color
+        // names aren't available anywhere in the data. First test showed every swatch
+        // reading as "branco" - the button's own Image stays a neutral white tint when the
+        // game uses its material-swap system (useCharacterMaterial), so the real sample
+        // color has to come from the assigned CharacterMaterial/SpriteColor data instead.
+        private static string DescribeColor(Selectable selectable)
+        {
+            var colorButton = selectable.GetComponent<ColorButton>();
+            Color? sample = null;
+
+            if (colorButton != null && colorButton.useCharacterMaterial)
+            {
+                if (ColorButtonMaterialField?.GetValue(colorButton) is CharacterMaterial material)
+                {
+                    sample = material.sampleColor;
+                }
+            }
+            else if (colorButton != null && ColorButtonSpriteColorField != null)
+            {
+                sample = ((SpriteColor)ColorButtonSpriteColorField.GetValue(colorButton)).color;
+            }
+
+            if (sample == null)
+            {
+                var image = selectable.GetComponent<Image>() ?? selectable.GetComponentInChildren<Image>();
+                if (image != null) sample = image.color;
+            }
+
+            if (sample == null) return UITextExtractor.GetReadableText(selectable.gameObject);
+
+            string best = "desconhecida";
+            float bestDist = float.MaxValue;
+            foreach (var (name, color) in NamedColors)
+            {
+                float dr = sample.Value.r - color.r, dg = sample.Value.g - color.g, db = sample.Value.b - color.b;
+                float dist = dr * dr + dg * dg + db * db;
+                if (dist < bestDist) { bestDist = dist; best = name; }
+            }
+
+            var match = System.Text.RegularExpressions.Regex.Match(selectable.gameObject.name, @"\d+$");
+            return match.Success ? $"Cor {match.Value}: {best}" : $"Cor: {best}";
         }
 
         // The current-value TextMeshProUGUI for a Previous/Next row isn't a child of the row
@@ -364,8 +582,16 @@ namespace TravellersRestAccess
 
         private bool IsMultiSelectNavButton(GameObject go)
         {
-            return (go.name == "PreviousButton" || go.name == "NextButton")
-                && go.transform.parent != null && go.transform.parent.name == "MultiSelection";
+            if (go.name != "PreviousButton" && go.name != "NextButton") return false;
+            var parent = go.transform.parent;
+            if (parent == null) return false;
+
+            // Options-style: both buttons live under a "MultiSelection" wrapper.
+            if (parent.name == "MultiSelection") return true;
+
+            // Character Creator style: PreviousButton/NextButton are direct siblings of
+            // each other - hide NextButton only, PreviousButton becomes the collapsed row.
+            return go.name == "NextButton" && parent.Find("PreviousButton") != null;
         }
 
         private bool SameItems(List<NavItem> a, List<NavItem> b)
@@ -398,7 +624,7 @@ namespace TravellersRestAccess
 
             var entry = _items[_currentIndex];
             var item = entry.Anchor;
-            string text = UITextExtractor.GetReadableText(item.gameObject);
+            string text = entry.LabelReader != null ? entry.LabelReader() : UITextExtractor.GetReadableText(item.gameObject);
             string message;
 
             if (entry.VolumeSlider != null)
@@ -407,7 +633,8 @@ namespace TravellersRestAccess
             }
             else if (entry.MultiSelectPrev != null && entry.MultiSelectNext != null)
             {
-                message = $"{text}: {entry.MultiSelectValueReader()} ({_currentIndex + 1} of {_items.Count})";
+                string rowLabel = item.gameObject.name == "PreviousButton" ? null : text;
+                message = $"{FormatLabelValue(rowLabel, entry.MultiSelectValueReader())} ({_currentIndex + 1} of {_items.Count})";
             }
             else
             {
@@ -419,6 +646,10 @@ namespace TravellersRestAccess
                 else if (toggle != null)
                 {
                     message = $"{text}: {(toggle.isOn ? "on" : "off")} ({_currentIndex + 1} of {_items.Count})";
+                }
+                else if (entry.SelectedStateReader != null)
+                {
+                    message = $"{text}: {(entry.SelectedStateReader() ? "selected" : "not selected")} ({_currentIndex + 1} of {_items.Count})";
                 }
                 else
                 {
@@ -436,7 +667,18 @@ namespace TravellersRestAccess
 
             var entry = _items[_currentIndex];
             var item = entry.Anchor;
-            string label = UITextExtractor.GetReadableText(item.gameObject);
+            string label = entry.LabelReader != null ? entry.LabelReader() : UITextExtractor.GetReadableText(item.gameObject);
+
+            var inputField = item.GetComponent<TMP_InputField>();
+            if (inputField != null)
+            {
+                inputField.ActivateInputField();
+                EventSystem.current.SetSelectedGameObject(item.gameObject);
+                _editingInputField = inputField;
+                DebugLogger.LogInput("Enter", $"Edit {item.gameObject.name}");
+                ScreenReader.Announce($"Editando {label}. Digite o texto, Enter ou Escape para confirmar.");
+                return;
+            }
 
             if (entry.VolumeSlider != null)
             {
@@ -451,7 +693,8 @@ namespace TravellersRestAccess
                 var prevButton = entry.MultiSelectPrev;
                 var nextButton = entry.MultiSelectNext;
                 var reader = entry.MultiSelectValueReader;
-                StartAdjusting(label, () => prevButton.onClick.Invoke(), () => nextButton.onClick.Invoke(), reader);
+                string rowLabel = item.gameObject.name == "PreviousButton" ? null : label;
+                StartAdjusting(rowLabel, () => prevButton.onClick.Invoke(), () => nextButton.onClick.Invoke(), reader);
                 return;
             }
 
@@ -480,6 +723,14 @@ namespace TravellersRestAccess
                 // Remember which Options tab was just selected - the game doesn't reliably
                 // expose this itself (confirmed via diagnostic logs), so we track it.
                 _selectedOptionsPanelType = panelType;
+            }
+            else if (entry.SelectedStateReader != null)
+            {
+                ScreenReader.Announce($"{label} selected");
+            }
+            else if (entry.ActivationAnnouncement != null)
+            {
+                ScreenReader.Announce(entry.ActivationAnnouncement);
             }
 
             DebugLogger.LogInput("Enter", $"Activate {item.gameObject.name}");

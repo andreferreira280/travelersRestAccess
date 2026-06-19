@@ -41,6 +41,7 @@ namespace TravellersRestAccess
         // private InventoryHandler _inventoryHandler;
         private MenuAnnouncer _menuAnnouncer;
         private KeyboardUINavigator _keyboardNavigator;
+        private DialogueAnnouncer _dialogueAnnouncer;
 
         #endregion
 
@@ -58,6 +59,7 @@ namespace TravellersRestAccess
             _menuAnnouncer = new MenuAnnouncer();
             _menuAnnouncer.Initialize();
             _keyboardNavigator = new KeyboardUINavigator();
+            _dialogueAnnouncer = new DialogueAnnouncer();
         }
 
         private IEnumerator AnnounceStartupDelayed()
@@ -142,6 +144,7 @@ namespace TravellersRestAccess
         private void UpdateHandlers()
         {
             _keyboardNavigator.Update();
+            _dialogueAnnouncer.Update(_keyboardNavigator.ItemCount);
         }
 
         #endregion
