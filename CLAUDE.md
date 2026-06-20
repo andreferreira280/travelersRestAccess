@@ -8,6 +8,26 @@
 - For uncertainties: Ask briefly, then act
 - Screen reader-friendly output: NO tables with `|`, use lists instead
 
+## Efficiency / Collaboration Style (user request, 2026-06-20)
+
+- Don't propose global restructuring, broad refactors, or organization
+  changes unless explicitly asked - keep using the project structure
+  exactly as it is.
+- Reuse context already established in the session/docs before
+  re-reading files; when more context is needed, ask for the minimal
+  delta/diff/snippet, not the whole file.
+- Work in small, incremental steps; aim for the smallest change that
+  satisfies the request.
+- Treat prior decisions as still valid unless the user says otherwise;
+  don't re-explain or re-diagnose things already settled.
+- At the start of a new session, do a compact strategic read of current
+  state (project_status.md + the relevant module doc) before diving in,
+  rather than re-exploring the whole codebase.
+- In `novo_pedido.txt`, in addition to the existing
+  done/investigating/next-test sections, briefly state what was
+  understood from the user's latest message and what was/will be done
+  about each point, so they can confirm the read was correct.
+
 ## Project Start
 
 For greetings ("Hello", "New project", "Let's go"):

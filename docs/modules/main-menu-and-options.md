@@ -103,6 +103,17 @@ seleção nativo da Unity - o mod mantém seu próprio "cursor virtual"
   - `OthersMenuUI.tutorialEnabledToggle`, `increaseUIToggle`,
     `autoRunUIToggle`, `vibrationUIToggle`, `inviteCodeUIToggle`,
     `easyDifficultyUIToggle`
+- **Validado em 2026-06-19**: a dica de carregamento menciona "mudar o
+  nível de dificuldade em Opções" - usuário suspeitou que era só um
+  toggle, não níveis de verdade. Confirmado no código decompilado:
+  `easyDifficultyUIToggle` é exatamente isso, um único toggle on/off
+  (`EventsManager.instance.easyDifficultyMode`) específico pra
+  facilitar EVENTOS/DESAFIOS especiais, não uma dificuldade geral do
+  jogo - não existe nenhum sistema de "níveis" de dificuldade em
+  lugar nenhum do código (só dificuldades internas de minigames
+  específicos, como pesca/banho/corte de peixe, sem UI própria em
+  Opções). Já é tratado normalmente pelo nosso código genérico de
+  `ToggleButton` - nada adicional precisa ser feito aqui.
 - Detecção robusta: procurar `ToggleButton` no próprio objeto, nos filhos e
   nos pais (`GetComponent ?? GetComponentInChildren ?? GetComponentInParent`),
   e só considerar `VolumeSliderUI` se NENHUM `ToggleButton` for encontrado.

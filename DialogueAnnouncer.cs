@@ -38,6 +38,17 @@ namespace TravellersRestAccess
         private static readonly Regex DayCounterPattern = new Regex(@"^[A-Za-zÀ-ÿ]{3}\.\s*\d+$");
         private static readonly Regex ActionPromptPattern = new Regex(@"^\[\w\]");
 
+        // Confirmed live: starting a New Game (still inside the title screen scene, no
+        // actual Unity scene change) caused a burst of unrelated HUD labels to all
+        // "stabilize" at once and get read together as one nonsensical blob: "00. 00. 00.
+        // Fechado. <farming tip>. 1st Floor. v0.7.5.3.0" - none of that is dialogue.
+        // Filtered by hierarchy path (more reliable than guessing at text patterns for
+        // arbitrary HUD numbers like "00").
+        private static readonly string[] KnownHudPaths =
+        {
+            "TimeAndWeather", "PlayerMoney", "TavernInfoUIRight", "Version Number",
+        };
+
         private readonly Dictionary<int, string> _lastAnnounced = new Dictionary<int, string>();
         private readonly Dictionary<int, (string text, float since)> _pending = new Dictionary<int, (string text, float since)>();
         private readonly HashSet<int> _loggedClickables = new HashSet<int>();
@@ -47,17 +58,52 @@ namespace TravellersRestAccess
         private string _lastStoryMessage;
         private string _lastAmbientMessage;
 
-        public void Update(int activeMenuItemCount)
+        // Starting a New Game shows a loading tip WITHOUT any real Unity scene change (it's
+        // an overlay inside the title screen scene, "MenuUI/TitleScreen/Loading Bar/Tips") -
+        // confirmed live this never triggers Main.cs's OnSceneWasLoaded("LoadingScene")
+        // announcement at all, since no scene change actually happens. Detected here
+        // instead, by the tip panel itself appearing/disappearing.
+        private bool _loadingBarSeen;
+        private string _lastLoggedActionPrompt;
+
+        // Dialogue response choices ("Response Menu Panel") - confirmed live this is a
+        // SEPARATE thing from the linear Continue Button: the user got stuck for several
+        // minutes on a conversation with a real choice ("Eu não sou um saqueador...") because
+        // it was only being read as plain dialogue text (looping the same announcement every
+        // time it re-stabilized) - Space/Enter did nothing since there was no Continue
+        // Button, only this response button, which we never looked for or could navigate.
+        private readonly List<Button> _responseButtons = new List<Button>();
+        private int _responseIndex;
+
+        public void Update(bool anyUiOpen)
         {
             // When a real navigable menu is open (Options, Save, Character Creator, etc.),
             // KeyboardUINavigator already owns announcements for it - scanning here too
             // caused duplicate readouts (confirmed live: "Carregar. Novo" and the whole
             // Character Creator screen got read as one blob on top of the normal per-item
             // announcements). Only scan/announce when nothing else is handling the screen.
-            if (activeMenuItemCount > 0) return;
+            //
+            // Gated on MainUI.IsAnyUIOpen(1) directly, not KeyboardUINavigator.ItemCount -
+            // confirmed live the item count lags a few frames behind the window actually
+            // opening (content/layout needs a moment to populate), and during that gap this
+            // scan was picking up the panel's own placeholder body text (e.g. "Sem receitas
+            // ainda") and overwriting _lastStoryMessage with it, which is why Up stopped
+            // re-reading the real last story/objective line after opening a MainPanelUI tab.
+            if (anyUiOpen) return;
 
-            ScanAndAnnounceText();
-            HandleAdvanceAndRereadInput();
+            ScanResponseButtons();
+            if (_responseButtons.Count > 0)
+            {
+                // A real dialogue choice is on screen - takes over Up/Down/Space entirely
+                // until the player picks one (see field comment). Skipping the normal text
+                // scan also avoids the response text getting read again as plain narration.
+                HandleResponseInput();
+            }
+            else
+            {
+                ScanAndAnnounceText();
+                HandleAdvanceAndRereadInput();
+            }
 
             // Diagnostic only: log every clickable element we can find (not just Button),
             // to spot future custom controls.
@@ -67,10 +113,93 @@ namespace TravellersRestAccess
             }
         }
 
+        private void ScanResponseButtons()
+        {
+            // Sorted by sibling index, not screen position - confirmed live every response
+            // seen so far had only 1 option, but a horizontal response layout would give
+            // near-identical Y values for all of them, making position-based ordering flicker
+            // frame to frame (sibling index is what Unity layout groups actually use, stable
+            // regardless of layout direction).
+            var found = Object.FindObjectsOfType<Button>()
+                .Where(b => b.gameObject.activeInHierarchy && b.interactable && HierarchyPath(b.transform).Contains("Response Menu Panel"))
+                .OrderBy(b => b.transform.GetSiblingIndex())
+                .ToList();
+
+            // Compare as a SET, not an ordered sequence - avoids resetting _responseIndex
+            // (and re-announcing) every frame over harmless reordering noise; only a real
+            // change in WHICH buttons exist should restart the selection.
+            bool sameSet = found.Count == _responseButtons.Count && found.All(b => _responseButtons.Contains(b));
+            if (sameSet) return;
+
+            _responseButtons.Clear();
+            _responseButtons.AddRange(found);
+            _responseIndex = 0;
+
+            if (_responseButtons.Count > 0)
+            {
+                AnnounceCurrentResponse();
+            }
+        }
+
+        private void AnnounceCurrentResponse()
+        {
+            string text = UITextExtractor.GetReadableText(_responseButtons[_responseIndex].gameObject);
+            string message = _responseButtons.Count > 1
+                ? $"Escolha {_responseIndex + 1} de {_responseButtons.Count}: {text}"
+                : text;
+            ScreenReader.Announce(message);
+            DebugLogger.LogState($"Dialogue response: \"{text}\" ({_responseIndex + 1} of {_responseButtons.Count})");
+        }
+
+        private void HandleResponseInput()
+        {
+            // No ">1" guard here on purpose - confirmed live every response screen so far
+            // had exactly 1 option, and Up/Down were doing NOTHING at all in that case
+            // (this method fully replaces the normal re-read handling while active), which
+            // read as "arrows broken" to the user. With 1 option this just re-announces the
+            // same text, same as a normal re-read - harmless, and gives feedback the key did
+            // something.
+            if (Input.GetKeyDown(KeyCode.UpArrow))
+            {
+                bool atBoundary = _responseButtons.Count == 1 || _responseIndex == 0;
+                _responseIndex = (_responseIndex - 1 + _responseButtons.Count) % _responseButtons.Count;
+                UISound.PlayNavigate();
+                if (atBoundary) UISound.PlayBoundaryDelayed();
+                DebugLogger.LogInput("Up", "Previous dialogue response");
+                AnnounceCurrentResponse();
+                return;
+            }
+            if (Input.GetKeyDown(KeyCode.DownArrow))
+            {
+                bool atBoundary = _responseButtons.Count == 1 || _responseIndex == _responseButtons.Count - 1;
+                _responseIndex = (_responseIndex + 1) % _responseButtons.Count;
+                UISound.PlayNavigate();
+                if (atBoundary) UISound.PlayBoundaryDelayed();
+                DebugLogger.LogInput("Down", "Next dialogue response");
+                AnnounceCurrentResponse();
+                return;
+            }
+
+            // Same reasoning as the Continue Button: Enter is unreliable here (used by the
+            // game elsewhere), Space is free and already the established way to confirm.
+            if (Input.GetKeyDown(KeyCode.Space))
+            {
+                Button chosen = _responseButtons[_responseIndex];
+                UISound.PlayChoiceConfirm();
+                DebugLogger.LogInput("Space", $"Choose dialogue response: {UITextExtractor.GetReadableText(chosen.gameObject)}");
+                chosen.onClick.Invoke();
+                _responseButtons.Clear();
+                _responseIndex = 0;
+            }
+        }
+
         private void ScanAndAnnounceText()
         {
             var labels = Object.FindObjectsOfType<TextMeshProUGUI>()
-                .Where(t => t.gameObject.activeInHierarchy && !string.IsNullOrWhiteSpace(t.text));
+                .Where(t => t.gameObject.activeInHierarchy && !string.IsNullOrWhiteSpace(t.text))
+                .ToList();
+
+            CheckLoadingBar(labels);
 
             var ready = new List<(float y, string text, string path)>();
 
@@ -79,7 +208,21 @@ namespace TravellersRestAccess
                 int id = label.GetInstanceID();
                 string clean = UITextExtractor.GetReadableText(label);
                 if (string.IsNullOrEmpty(clean) || clean.Length < 2) continue;
+
+                if (Main.DebugMode && ActionPromptPattern.IsMatch(clean) && clean != _lastLoggedActionPrompt)
+                {
+                    // Currently filtered as noise - logged (not suppressed silently) so we
+                    // have real path/text data to design ambient interactable narration
+                    // from later (the user wants to know what's nearby while walking
+                    // around - this prompt is the game's own "press E to ..." hint, which is
+                    // exactly that signal, just never used as one yet).
+                    _lastLoggedActionPrompt = clean;
+                    DebugLogger.LogState($"Action prompt seen (filtered): \"{clean}\" path={HierarchyPath(label.transform)}");
+                }
                 if (IsKnownHudNoise(clean)) continue;
+
+                string path = HierarchyPath(label.transform);
+                if (IsKnownHudPath(path)) continue;
 
                 _lastAnnounced.TryGetValue(id, out var alreadyAnnounced);
                 if (clean == alreadyAnnounced) continue;
@@ -94,7 +237,7 @@ namespace TravellersRestAccess
                 {
                     _lastAnnounced[id] = clean;
                     _pending.Remove(id);
-                    ready.Add((label.transform.position.y, clean, HierarchyPath(label.transform)));
+                    ready.Add((label.transform.position.y, clean, path));
                 }
             }
 
@@ -160,30 +303,63 @@ namespace TravellersRestAccess
             // made it unreliable for advancing here - Space is free and tested working.
             if (Input.GetKeyDown(KeyCode.Space))
             {
-                Button continueButton = FindActiveContinueButton();
-                if (continueButton != null)
+                // Root cause found by reading the user's own Latest.log across several
+                // sessions: requiring `.interactable` here meant this NEVER matched, not
+                // once, in any session, even though dialogue visibly advanced one line per
+                // Space press the whole time - the game advances it natively by itself,
+                // bypassing this Button's onClick entirely (it's seemingly never
+                // `interactable`, by design, regardless of mode). So we no longer try to
+                // invoke it ourselves (that risked double-advancing, racing the game's own
+                // handler) - just detect it's showing (`activeInHierarchy` only) to play the
+                // confirm sound alongside whatever the game itself is about to do.
+                if (IsContinueButtonShowing())
                 {
-                    DebugLogger.LogInput("Space", "Advance dialogue");
-                    continueButton.onClick.Invoke();
+                    UISound.PlayChoiceConfirm();
+                    DebugLogger.LogInput("Space", "Advance dialogue (sound only - game handles the actual advance)");
+                }
+                else if (Main.DebugMode)
+                {
+                    DebugLogger.LogState("Space pressed but no Continue Button showing");
                 }
             }
         }
 
-        private static Button FindActiveContinueButton()
+        private static bool IsContinueButtonShowing()
         {
             foreach (var button in Object.FindObjectsOfType<Button>())
             {
-                if (button.gameObject.name == "Continue Button" && button.gameObject.activeInHierarchy && button.interactable)
+                if (button.gameObject.name == "Continue Button" && button.gameObject.activeInHierarchy)
                 {
-                    return button;
+                    return true;
                 }
             }
-            return null;
+            return false;
         }
 
         private static bool IsKnownHudNoise(string clean)
         {
             return ClockPattern.IsMatch(clean) || DayCounterPattern.IsMatch(clean) || ActionPromptPattern.IsMatch(clean);
+        }
+
+        private void CheckLoadingBar(List<TextMeshProUGUI> labels)
+        {
+            bool loadingBarActive = labels.Any(l => HierarchyPath(l.transform).Contains("Loading Bar"));
+
+            if (loadingBarActive && !_loadingBarSeen)
+            {
+                ScreenReader.Announce("Carregando jogo...");
+            }
+
+            _loadingBarSeen = loadingBarActive;
+        }
+
+        private static bool IsKnownHudPath(string path)
+        {
+            foreach (var fragment in KnownHudPaths)
+            {
+                if (path.Contains(fragment)) return true;
+            }
+            return false;
         }
 
         private static string HierarchyPath(Transform t)
