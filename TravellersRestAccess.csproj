@@ -54,6 +54,10 @@
       <HintPath>C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\TravellersRest_Data\Managed\UnityEngine.UIModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityEngine.AudioModule">
+      <HintPath>C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\TravellersRest_Data\Managed\UnityEngine.AudioModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="Unity.TextMeshPro">
       <HintPath>C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\TravellersRest_Data\Managed\Unity.TextMeshPro.dll</HintPath>
       <Private>false</Private>

@@ -176,6 +176,10 @@ Not used anywhere in decompiled code - safe to claim for accessibility mod short
 ## 7. Audio System
 
 - Game uses **psai.net** (`psai.net` namespace, 40+ files) - a dynamic/adaptive music middleware (PsaiCore, Logik, Theme, Segment, AudioPlaybackLayerChannelUnity). Not yet analyzed in depth; likely irrelevant to accessibility (music layer only), but worth knowing it exists if SFX cues need investigation later.
+- **SFX clip library: `Sound` singleton (`Sound.GGFJGHHHEJC`, public static property).** Has public `AudioClip[]` fields for every SFX in the game (`uiWindowOpen`, `uiWindowClose`, `uiClickPos`, `uiClickNeg`, `stepsWood`, `openDoor`, `newQuest`, etc. - 30+ fields, see decompiled `Sound.cs`). Play one with `Sound.GGFJGHHHEJC.PlayOneShot(Utils.CPDCJAHJOPE(Sound.GGFJGHHHEJC.<field>), true, null, null, <volume 0-1>, <pitch, default 1>)` - `Utils.CPDCJAHJOPE<T>(T[])` picks a random element (most clip fields are arrays of variations). `PlayOneShot` silently no-ops if the game's own `blockSound` HashSet (public instance field) is non-empty - relevant if a sound cue mysteriously doesn't play. Used by `UISound.cs` for the mod's own sound feedback, reusing `uiClickPos`/`uiClickNeg` instead of adding new audio assets:
+  - `PlayNavigate()` - every list move, and Enter/Space confirms.
+  - `PlayBoundary()` / `PlayBoundaryDelayed()` - boundary cue (1-item list, or hit top/bottom). Always use the delayed variant when layering it on top of `PlayNavigate()` in the same action - playing both in the same frame made them blend into one indistinguishable sound (confirmed via user feedback); the delayed version waits ~0.15s (via `MelonCoroutines.Start`) so they're heard as two distinct sounds.
+  - `PlayChoiceConfirm()` - same clip as `PlayNavigate()`, pitched up, for "a dialogue response was chosen" specifically (vs. just advancing to the next line) - user asked for those two to sound different.
 
 ---
 
@@ -239,6 +243,8 @@ string lang = I2.Loc.LocalizationManager.CurrentLanguage;
 
 - Many internal fields/methods have **compiler-obfuscated names** (random uppercase letter sequences like `GGFJGHHHEJC`). These are legitimate working symbols - always grep the decompiled source to get exact current names before writing code; never guess or assume a "clean" name exists.
 - Some `KeyCode` usages appear as raw negative or unusual integers (e.g. `(KeyCode)(-160)`) - purpose unconfirmed, re-verify context in source before assuming a key is free.
+- **Input is per-window, not centralized.** `PlayerInputs` has a generic per-frame input dispatcher, but individual `UIWindow` subclasses (e.g. `CharacterCreatorUI`) frequently override `Update()` themselves and check Rewired actions (`PlayerInputs.GetPlayer(playerNum).GetButtonDown("ActionName")`) directly, completely bypassing the generic dispatcher. **Lesson learned the hard way (4 failed fix attempts on the Space-closes-Character-Creator bug before finding this):** when a key does something we don't control and the cause isn't obvious, search the SPECIFIC `UIWindow` subclass's own decompiled `Update()`/`LateUpdate()` override FIRST - don't assume it goes through any shared/generic input path. Concretely, `CharacterCreatorUI.Update()` calls `AcceptButton()` directly whenever Rewired action `"ClosePopUp"` fires (apparently bound to both Escape and Space) and no text field has focus - nothing to do with UI selection or our own navigation code.
+- **Debug tooling:** `DebugLogger.LogRawKeyDowns()` (called every frame from `Main.OnUpdate`, debug-mode gated) logs every key that goes down each frame regardless of whether any of our own handlers react to it - check this first when a key seems to do something unexpected, instead of re-deriving suspicion from scratch.
 
 ---
 

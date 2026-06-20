@@ -1,6 +1,7 @@
 using MelonLoader;
 using UnityEngine;
 using System.Collections;
+using HarmonyLib;
 
 // ============================================================================
 // CRITICAL: Accessing game code
@@ -30,6 +31,8 @@ namespace TravellersRestAccess
         #region Fields
 
         private bool _gameReady = false;
+        private HarmonyLib.Harmony _harmony;
+        private bool _patchesApplied;
 
         /// <summary>
         /// Debug mode - when true, logs all screenreader output and detailed game state.
@@ -41,6 +44,17 @@ namespace TravellersRestAccess
         // private InventoryHandler _inventoryHandler;
         private MenuAnnouncer _menuAnnouncer;
         private KeyboardUINavigator _keyboardNavigator;
+        private DialogueAnnouncer _dialogueAnnouncer;
+
+        // "Carregando jogo..." kept getting cut off almost immediately by
+        // DialogueAnnouncer announcing the loading screen's tip text (confirmed: MainUI
+        // persists across scene loads, so _gameReady flips back true within a frame or two,
+        // and Announce() always interrupts whatever is currently speaking) - give our own
+        // announcement a clear run before any other announcer is allowed to speak. Counted
+        // in FRAMES, not seconds: a real loading stall can make Time.unscaledTime jump by
+        // several seconds in a single tick once it's done, which would silently skip past a
+        // time-based window the instant things resume.
+        private int _dialogueAnnouncerSuppressFrames;
 
         #endregion
 
@@ -50,6 +64,7 @@ namespace TravellersRestAccess
         {
             ScreenReader.Initialize();
             InitializeHandlers();
+            _harmony = new HarmonyLib.Harmony("TravellersRestAccess");
             MelonCoroutines.Start(AnnounceStartupDelayed());
         }
 
@@ -58,6 +73,7 @@ namespace TravellersRestAccess
             _menuAnnouncer = new MenuAnnouncer();
             _menuAnnouncer.Initialize();
             _keyboardNavigator = new KeyboardUINavigator();
+            _dialogueAnnouncer = new DialogueAnnouncer();
         }
 
         private IEnumerator AnnounceStartupDelayed()
@@ -69,6 +85,8 @@ namespace TravellersRestAccess
 
         public override void OnUpdate()
         {
+            DebugLogger.LogRawKeyDowns();
+
             // Global hotkeys (F1 help, F12 debug toggle) work regardless of game state.
             if (ProcessHotkeys()) return;
 
@@ -85,6 +103,19 @@ namespace TravellersRestAccess
             {
                 _gameReady = true;
                 MelonLogger.Msg("Game ready");
+
+                if (!_patchesApplied)
+                {
+                    SpaceClosePatch.Apply(_harmony);
+                    TutorialTracePatch.Apply(_harmony);
+                    MovementAxisPatch.Apply(_harmony);
+                    // User's explicit request 2026-06-19: arrow keys should never move the
+                    // character, even outside menus (Up/Down stay free for re-reading
+                    // dialogue - that's handled separately in DialogueAnnouncer, unaffected
+                    // by this). Permanently on, not just while a nav screen is open.
+                    MovementAxisPatch.SuppressArrowMovement = true;
+                    _patchesApplied = true;
+                }
             }
 
             return _gameReady;
@@ -95,6 +126,15 @@ namespace TravellersRestAccess
             MelonLogger.Msg($"Scene loaded: {sceneName}");
             DebugLogger.LogState($"Scene changed to: {sceneName}");
             _gameReady = false;
+
+            // The loading screen's tip text gets picked up by DialogueAnnouncer's scene
+            // scan on its own, but there was no announcement that the game was actually
+            // loading at all - just a tip with no context (confirmed live).
+            if (sceneName == "LoadingScene")
+            {
+                ScreenReader.Announce("Carregando jogo...");
+                _dialogueAnnouncerSuppressFrames = 90;
+            }
         }
 
         public override void OnApplicationQuit()
@@ -142,6 +182,14 @@ namespace TravellersRestAccess
         private void UpdateHandlers()
         {
             _keyboardNavigator.Update();
+
+            if (_dialogueAnnouncerSuppressFrames > 0)
+            {
+                _dialogueAnnouncerSuppressFrames--;
+                return;
+            }
+
+            _dialogueAnnouncer.Update(MainUI.IsAnyUIOpen(1));
         }
 
         #endregion

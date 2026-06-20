@@ -1,4 +1,5 @@
 using MelonLoader;
+using UnityEngine;
 
 namespace TravellersRestAccess
 {
@@ -63,6 +64,32 @@ namespace TravellersRestAccess
             if (!Main.DebugMode) return;
 
             MelonLogger.Msg($"[GAME] {name} = {value}");
+        }
+
+        private static readonly KeyCode[] AllKeyCodes = (KeyCode[])System.Enum.GetValues(typeof(KeyCode));
+
+        /// <summary>
+        /// Logs every key that transitions to "down" this frame, regardless of whether any
+        /// of our handlers act on it - call once per frame from Main.OnUpdate. Unlike
+        /// LogInput (which only fires where we explicitly call it, i.e. only for keys we
+        /// already suspected mattered), this catches everything, including keys the game's
+        /// own code reacts to behind our back (this is how the Space-closes-Character-
+        /// Creator bug should have been visible from frame one, instead of needing several
+        /// rounds of guessing - cheap enough to leave on permanently in debug mode, since it
+        /// only does the expensive enum scan on frames where Input.anyKeyDown is true).
+        /// </summary>
+        public static void LogRawKeyDowns()
+        {
+            if (!Main.DebugMode) return;
+            if (!Input.anyKeyDown) return;
+
+            foreach (var key in AllKeyCodes)
+            {
+                if (Input.GetKeyDown(key))
+                {
+                    MelonLogger.Msg($"[INPUT-RAW] KeyDown: {key}");
+                }
+            }
         }
 
         private static string GetPrefix(LogCategory category)
