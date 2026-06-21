@@ -57,13 +57,25 @@ ainda, por ser uma rodada cheia de outros consertos).
    (`"[E] Arrumar a Cama"` foi visto antes, numa rodada bem anterior,
    mas sem confirmação recente) antes de transformar isso num anúncio
    de "tem algo aqui: ...".
-   - **Proposta**: em vez de filtrar esse texto, anunciar ele
-     (removendo o "[E] " e talvez prefixando com algo como "Próximo:
-     ...") sempre que aparecer/mudar/desaparecer - decisão de design
-     pendente: anunciar a cada objeto novo pode ficar repetitivo
-     andando por um corredor cheio de itens; talvez só anunciar a
-     PRIMEIRA vez que aparece após ficar ausente por um tempo, similar
-     ao debounce que já usamos noutros lugares.
+   - **Implementado (2026-06-20):** durante o teste da Etapa 1 da
+     navegação no mundo, o usuário relatou explicitamente não ter
+     NENHUM retorno ao andar perto de algo ("me sinto andando sem
+     direção") - virou prioridade imediata em vez de ficar pendente.
+     `DialogueAnnouncer.ScanAndAnnounceText()` agora anuncia
+     ("Próximo: " + texto sem o "[E]"/"[Q] ") em vez de filtrar,
+     sempre que o prompt aparece/muda, e limpa o último anunciado
+     assim que ele desaparece (assim, voltar pro MESMO objeto depois
+     anuncia de novo, não fica mudo pra sempre). Sem debounce extra por
+     enquanto - se andar por um corredor cheio de itens ficar
+     repetitivo, ajustar depois com base em teste real.
+   - **Corrigido (2026-06-20, rodada seguinte):** confirmado em teste
+     real que ficava repetindo sem parar - causa raiz no log: dois
+     prompts simultâneos (lareira mostrando "Abrir" E "Combustível" ao
+     mesmo tempo) faziam o rastreamento de "última frase" alternar
+     entre as duas a cada frame e re-anunciar ambas pra sempre. Trocado
+     por um `HashSet` com as frases atualmente visíveis (anuncia só as
+     novas). Também adicionado o nome do objeto ao anúncio (ex:
+     "Porta: Abrir") via `WorldNavigationHandler.GetNearestInteractionName()`.
 3. **Mapa**: existem várias telas de mapa - `CityMapUI` (mapa da
    cidade), `MiniMapUI` (minimapa), `TreasureMapUI` (mapa de tesouro).
    Todas são visuais (posições espaciais numa imagem) - tornar isso

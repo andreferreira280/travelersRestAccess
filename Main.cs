@@ -45,6 +45,7 @@ namespace TravellersRestAccess
         private MenuAnnouncer _menuAnnouncer;
         private KeyboardUINavigator _keyboardNavigator;
         private DialogueAnnouncer _dialogueAnnouncer;
+        private WorldNavigationHandler _worldNavigationHandler;
 
         // "Carregando jogo..." kept getting cut off almost immediately by
         // DialogueAnnouncer announcing the loading screen's tip text (confirmed: MainUI
@@ -74,6 +75,7 @@ namespace TravellersRestAccess
             _menuAnnouncer.Initialize();
             _keyboardNavigator = new KeyboardUINavigator();
             _dialogueAnnouncer = new DialogueAnnouncer();
+            _worldNavigationHandler = new WorldNavigationHandler();
         }
 
         private IEnumerator AnnounceStartupDelayed()
@@ -103,6 +105,21 @@ namespace TravellersRestAccess
             {
                 _gameReady = true;
                 MelonLogger.Msg("Game ready");
+                // User reported no custom sound at all this round - log confirmed ZERO
+                // "CustomSounds:" lines (not even "loaded parede.wav", which always logged
+                // in every earlier session). That points to loading itself silently failing
+                // somewhere before this round's volume change, not the 60% volume value
+                // itself (0.6 wouldn't go silent). Logging unconditionally + catching here to
+                // pin down exactly where the chain breaks next test.
+                DebugLogger.LogState("Main: calling CustomSounds.EnsureLoaded");
+                try
+                {
+                    CustomSounds.EnsureLoaded();
+                }
+                catch (System.Exception ex)
+                {
+                    DebugLogger.LogState($"Main: CustomSounds.EnsureLoaded threw: {ex}");
+                }
 
                 if (!_patchesApplied)
                 {
@@ -181,7 +198,10 @@ namespace TravellersRestAccess
 
         private void UpdateHandlers()
         {
+            bool anyUiOpen = MainUI.IsAnyUIOpen(1);
+
             _keyboardNavigator.Update();
+            _worldNavigationHandler.Update(anyUiOpen);
 
             if (_dialogueAnnouncerSuppressFrames > 0)
             {
@@ -189,7 +209,7 @@ namespace TravellersRestAccess
                 return;
             }
 
-            _dialogueAnnouncer.Update(MainUI.IsAnyUIOpen(1));
+            _dialogueAnnouncer.Update(anyUiOpen);
         }
 
         #endregion

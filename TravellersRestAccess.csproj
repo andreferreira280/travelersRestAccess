@@ -62,6 +62,18 @@
       <HintPath>C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\TravellersRest_Data\Managed\Unity.TextMeshPro.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityEngine.UnityWebRequestModule">
+      <HintPath>C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\TravellersRest_Data\Managed\UnityEngine.UnityWebRequestModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UnityWebRequestAudioModule">
+      <HintPath>C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\TravellersRest_Data\Managed\UnityEngine.UnityWebRequestAudioModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.Physics2DModule">
+      <HintPath>C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\TravellersRest_Data\Managed\UnityEngine.Physics2DModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <!-- Game assembly -->
@@ -70,12 +82,17 @@
       <HintPath>C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\TravellersRest_Data\Managed\Assembly-CSharp.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="Assembly-CSharp-firstpass">
+      <HintPath>C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\TravellersRest_Data\Managed\Assembly-CSharp-firstpass.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
-  <!-- After build: copy DLL to the game's Mods folder -->
+  <!-- After build: copy DLL (and custom sound files, loaded next to it at runtime) to the game's Mods folder -->
   <Target Name="CopyToMods" AfterTargets="Build">
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\Mods\" />
-    <Message Text="Copied $(TargetFileName) to Mods folder" Importance="High" />
+    <Copy SourceFiles="parede.wav;itens.wav;stand.wav;baixo.wav;cima.wav;esquerda.wav;direita.wav;baú.wav;cama.wav;mesa.wav;torneira.wav;batendo em item.wav" DestinationFolder="C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\Mods\" />
+    <Message Text="Copied $(TargetFileName) and sound files to Mods folder" Importance="High" />
   </Target>
 
 </Project>

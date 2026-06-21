@@ -23,7 +23,11 @@ namespace TravellersRestAccess
     ///   track, which auto-advances on its own and can be skipped by holding ESC (the game's
     ///   own hint, not ours).
     /// - ".../Bubble Template Standard Bark UI/.../Text (TMP)" - ambient NPC barks (small
-    ///   talk from other characters wandering around, not part of the main story).
+    ///   talk from other characters wandering around, not part of the main story). The
+    ///   PLAYER's own bark lines use the exact same UI prefab, but rooted under "Player/"
+    ///   instead of an NPC name (confirmed live: "Player/Bubble Template Standard Bark
+    ///   UI/...") - those are the character's own reactions ("O barril está vazio.", "Eu
+    ///   não sei como usar isto.") and are kept; only non-Player ones are ambient noise.
     ///
     /// Waits for text to stop changing for a short moment before announcing, so a
     /// typewriter/letter-by-letter reveal effect doesn't spam partial words.
@@ -64,7 +68,7 @@ namespace TravellersRestAccess
         // announcement at all, since no scene change actually happens. Detected here
         // instead, by the tip panel itself appearing/disappearing.
         private bool _loadingBarSeen;
-        private string _lastLoggedActionPrompt;
+        private HashSet<string> _activeActionPrompts = new HashSet<string>();
 
         // Dialogue response choices ("Response Menu Panel") - confirmed live this is a
         // SEPARATE thing from the linear Continue Button: the user got stuck for several
@@ -195,13 +199,18 @@ namespace TravellersRestAccess
 
         private void ScanAndAnnounceText()
         {
-            var labels = Object.FindObjectsOfType<TextMeshProUGUI>()
+            // Widened from TextMeshProUGUI to TMP_Text (the common base, also covers
+            // world-space TextMeshPro) - user reported a message appearing after clicking a
+            // table to clean it that's never read; a floating world-space feedback popup
+            // (not a UI element) would have been invisible to the narrower UI-only scan.
+            var labels = Object.FindObjectsOfType<TMP_Text>()
                 .Where(t => t.gameObject.activeInHierarchy && !string.IsNullOrWhiteSpace(t.text))
                 .ToList();
 
             CheckLoadingBar(labels);
 
             var ready = new List<(float y, string text, string path)>();
+            var actionPromptsThisScan = new HashSet<string>();
 
             foreach (var label in labels)
             {
@@ -209,20 +218,47 @@ namespace TravellersRestAccess
                 string clean = UITextExtractor.GetReadableText(label);
                 if (string.IsNullOrEmpty(clean) || clean.Length < 2) continue;
 
-                if (Main.DebugMode && ActionPromptPattern.IsMatch(clean) && clean != _lastLoggedActionPrompt)
+                if (ActionPromptPattern.IsMatch(clean))
                 {
-                    // Currently filtered as noise - logged (not suppressed silently) so we
-                    // have real path/text data to design ambient interactable narration
-                    // from later (the user wants to know what's nearby while walking
-                    // around - this prompt is the game's own "press E to ..." hint, which is
-                    // exactly that signal, just never used as one yet).
-                    _lastLoggedActionPrompt = clean;
-                    DebugLogger.LogState($"Action prompt seen (filtered): \"{clean}\" path={HierarchyPath(label.transform)}");
+                    actionPromptsThisScan.Add(clean);
+                    // User's explicit request: hear SOMETHING when near an interactable
+                    // (door, bed, etc.) while exploring, instead of getting no feedback at
+                    // all. This is the game's own "[E] ..." action-bar hint - previously
+                    // filtered as noise. Announced once per appearance/change (not every
+                    // frame), "[E] "/"[Q] " prefix stripped.
+                    //
+                    // Tracked as a SET (not a single last-seen value): confirmed live that
+                    // some objects (e.g. a fireplace) show TWO prompts at once ("Abrir" +
+                    // "Combustível") - a single-value tracker ping-ponged between the two
+                    // every frame and announced both forever, instead of once each.
+                    if (!_activeActionPrompts.Contains(clean))
+                    {
+                        string stripped = ActionPromptPattern.Replace(clean, "").Trim();
+                        // Best-effort - user asked for the object's name, not just the verb
+                        // ("Abrir" alone doesn't say if it's a door, chest, etc.). Approximate
+                        // when 2 different objects each show their own prompt at once - see
+                        // WorldNavigationHandler.GetNearestInteractionTarget().
+                        var audioInfo = WorldNavigationHandler.GetNearestInteractionAudioInfo();
+                        string targetName = audioInfo?.name;
+                        string promptText = string.IsNullOrEmpty(targetName) ? stripped : $"{targetName}: {stripped}";
+                        CustomSounds.PlayItemNearby(audioInfo?.name, audioInfo?.pitch ?? 1f, audioInfo?.pan ?? 0f);
+                        ScreenReader.Say($"Próximo: {promptText}", interrupt: false);
+                        DebugLogger.LogState($"Action prompt announced: \"{promptText}\"");
+                    }
+                    continue;
                 }
                 if (IsKnownHudNoise(clean)) continue;
 
                 string path = HierarchyPath(label.transform);
                 if (IsKnownHudPath(path)) continue;
+
+                // Found the bug: last round narrowed IsAmbientNpcBark down to just the
+                // "Mudanza" family, but the actual skip/continue that MUTES a match had
+                // been removed entirely the round before (when the filter was opened up
+                // fully to hunt for the cat's line) - so narrowing the matcher list alone
+                // did nothing, the family kept getting announced just like everything else.
+                // Restoring the skip here, now scoped to just that family.
+                if (IsAmbientNpcBark(path)) continue;
 
                 _lastAnnounced.TryGetValue(id, out var alreadyAnnounced);
                 if (clean == alreadyAnnounced) continue;
@@ -241,11 +277,16 @@ namespace TravellersRestAccess
                 }
             }
 
+            // Replace wholesale: anything missing from this scan is gone, so walking back
+            // up to the SAME interactable later announces it again instead of staying
+            // silent forever; anything still present stays suppressed (no repeats).
+            _activeActionPrompts = actionPromptsThisScan;
+
             if (ready.Count == 0) return;
 
             var ordered = ready.OrderByDescending(r => r.y).ToList();
-            var storyEntries = ordered.Where(r => !r.path.Contains("Bark UI")).ToList();
-            var ambientEntries = ordered.Where(r => r.path.Contains("Bark UI")).ToList();
+            var storyEntries = ordered.Where(r => !IsAmbientNpcBark(r.path)).ToList();
+            var ambientEntries = ordered.Where(r => IsAmbientNpcBark(r.path)).ToList();
 
             string storyPart = storyEntries.Count > 0 ? string.Join(". ", storyEntries.Select(r => r.text)) : null;
             string ambientPart = ambientEntries.Count > 0 ? string.Join(". ", ambientEntries.Select(r => $"Conversa ao redor: {r.text}")) : null;
@@ -341,7 +382,7 @@ namespace TravellersRestAccess
             return ClockPattern.IsMatch(clean) || DayCounterPattern.IsMatch(clean) || ActionPromptPattern.IsMatch(clean);
         }
 
-        private void CheckLoadingBar(List<TextMeshProUGUI> labels)
+        private void CheckLoadingBar(List<TMP_Text> labels)
         {
             bool loadingBarActive = labels.Any(l => HierarchyPath(l.transform).Contains("Loading Bar"));
 
@@ -358,6 +399,22 @@ namespace TravellersRestAccess
             foreach (var fragment in KnownHudPaths)
             {
                 if (path.Contains(fragment)) return true;
+            }
+            return false;
+        }
+
+        // User's explicit request: re-filter only this specific family ("Mudanza" moving
+        // event - BuzzNPC/DoorNPC, confirmed in the log) instead of every non-Player bark.
+        // Opening the filter fully (previous round) didn't surface the cat's missing line
+        // either, so a blanket mute isn't earning its keep - keep other NPC barks audible.
+        private static readonly string[] FilteredAmbientNpcNames = { "BuzzNPC", "DoorNPC", "Mudanza" };
+
+        private static bool IsAmbientNpcBark(string path)
+        {
+            if (!path.Contains("Bark UI")) return false;
+            foreach (var name in FilteredAmbientNpcNames)
+            {
+                if (path.Contains(name)) return true;
             }
             return false;
         }

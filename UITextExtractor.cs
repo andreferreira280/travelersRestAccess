@@ -6,7 +6,9 @@ namespace TravellersRestAccess
 {
     /// <summary>
     /// Extracts screen-reader-readable text from a UI GameObject.
-    /// Travellers Rest uses TextMeshProUGUI exclusively for UI text (no legacy Text).
+    /// Travellers Rest uses TextMeshPro exclusively for text (no legacy Text). Reads
+    /// TMP_Text (the common base of TextMeshProUGUI and world-space TextMeshPro) so a
+    /// floating world-space feedback popup isn't missed just for not being a UI element.
     /// </summary>
     public static class UITextExtractor
     {
@@ -28,7 +30,7 @@ namespace TravellersRestAccess
             return Humanize(go.name);
         }
 
-        public static string GetReadableText(TextMeshProUGUI label)
+        public static string GetReadableText(TMP_Text label)
         {
             if (label == null || string.IsNullOrWhiteSpace(label.text)) return null;
             return CleanText(label.text);

@@ -68,6 +68,7 @@ namespace TravellersRestAccess
         private static readonly System.Reflection.FieldInfo EncyclopediaSectionTextField =
             typeof(EncyclopediaUI).GetField("sectionText", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         private string _lastAnnouncedEncyclopediaContent;
+        private string _lastAnnouncedYesNoQuestion;
 
         private static readonly Dictionary<string, Type> OptionsTabPanelTypes = new Dictionary<string, Type>
         {
@@ -200,6 +201,11 @@ namespace TravellersRestAccess
                 }
 
                 _lastTopWindow = topWindowNow;
+                // Reused singleton popup (same GameObject toggled active/inactive, not a new
+                // instance) - without this reset, asking the same question twice in a row
+                // (e.g. sleep, cancel, walk back into the trigger) would silently stay quiet
+                // the second time since the text wouldn't look "changed".
+                _lastAnnouncedYesNoQuestion = null;
             }
 
             var freshItems = CollectItems(justOpened: !_wasOpen);
@@ -414,6 +420,22 @@ namespace TravellersRestAccess
             return texts.Count == 0 ? "Missão" : $"Missão: {string.Join(". ", texts)}";
         }
 
+        private void AnnounceYesNoQuestionIfChanged(YesNoDialogueUI yesNoWindow)
+        {
+            if (yesNoWindow.boxText == null) return;
+
+            string question = UITextExtractor.GetReadableText(yesNoWindow.boxText);
+            if (string.IsNullOrEmpty(question) || question == _lastAnnouncedYesNoQuestion) return;
+
+            // Found via the bed: Bed.OnTriggerEnter2D opens this purely by proximity (no key
+            // press at all), with the question ("Dormir?") shown only as plain text in
+            // boxText - never read by the generic per-item scan, so the user had no idea a
+            // confirmation popup had even appeared and resorted to the mouse.
+            _lastAnnouncedYesNoQuestion = question;
+            DebugLogger.LogState($"YesNo question announced: \"{question}\"");
+            ScreenReader.Say(question, interrupt: false);
+        }
+
         private void AnnounceEncyclopediaContentIfChanged(EncyclopediaUI encyclopediaWindow)
         {
             if (EncyclopediaSectionTitleField == null || EncyclopediaSectionTextField == null) return;
@@ -589,6 +611,12 @@ namespace TravellersRestAccess
                 AnnounceEncyclopediaContentIfChanged(encyclopediaWindow);
             }
 
+            var yesNoWindow = topWindow as YesNoDialogueUI;
+            if (yesNoWindow != null)
+            {
+                AnnounceYesNoQuestionIfChanged(yesNoWindow);
+            }
+
             // Collapse each volume/stepped control (increase + decrease buttons, plus the
             // row's own button) into a single entry. The VolumeSliderUI component can sit on
             // an ancestor of the buttons (typical) or be found on a child "Slider" object
@@ -701,6 +729,16 @@ namespace TravellersRestAccess
                 if (selectable.GetComponent<ColorButton>() != null)
                 {
                     labelReader = () => DescribeColor(selectable);
+                }
+
+                // User reported container slots (e.g. opening a chest) reading the generic
+                // GameObject name ("New SlotUI Inventory") instead of the item inside, and
+                // one slot reading nothing at all - confirmed in decompiled source: SlotUI
+                // exposes its underlying Slot/ItemInstance/Item publicly, no UI text needed.
+                var slotUI = selectable.GetComponent<SlotUI>() ?? selectable.GetComponentInParent<SlotUI>();
+                if (slotUI != null)
+                {
+                    labelReader = () => DescribeSlotUI(slotUI);
                 }
 
                 var ownInputField = selectable.GetComponent<TMP_InputField>();
@@ -859,6 +897,28 @@ namespace TravellersRestAccess
             typeof(ColorButton).GetField("_material", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         private static readonly System.Reflection.FieldInfo ColorButtonSpriteColorField =
             typeof(ColorButton).GetField("_spriteColor", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+        private static string DescribeSlotUI(SlotUI slotUI)
+        {
+            var slot = slotUI.IHENCGDNPBL;
+            var item = slot?.itemInstance?.LHBPOPOIFLE();
+            // User questioned whether a chest reporting all slots "Vazio" was a bug or a
+            // genuinely empty chest - logging the raw lookup result (slot null? itemInstance
+            // null? item null?) instead of guessing which one it is.
+            if (Main.DebugMode) DebugLogger.LogState($"DescribeSlotUI: gameObject=\"{slotUI.gameObject.name}\" slot={(slot == null ? "null" : "set")} itemInstance={(slot?.itemInstance == null ? "null" : "set")} item={(item == null ? "null" : item.nameId)}");
+            if (item == null) return "Vazio";
+
+            // Found the real bug behind "Vazio" on a chest the user confirmed had the mop
+            // inside: the diagnostic above showed item=itemMop (a real item was found), but
+            // LocalisationSystem.Get(item.nameId) came back empty regardless - because
+            // nameId isn't always a direct lookup key. Item.IABAKHPEOAF() (decompiled) is the
+            // item's own proper name-resolution method - it knows about translationByID
+            // (which uses a different "Items/item_name_<id>" key instead of nameId) and
+            // falls back to the raw asset name if no translation exists at all, so it never
+            // incorrectly reports "Vazio" for a real item.
+            string name = item.IABAKHPEOAF();
+            return string.IsNullOrEmpty(name) ? "Vazio" : name;
+        }
 
         // The game has no name for each color swatch - this approximates one from the
         // underlying color value (nearest match in a small fixed palette), since exact color

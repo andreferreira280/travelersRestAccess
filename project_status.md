@@ -26,6 +26,11 @@
 
 ## Current Focus
 
+- **Active feature (started 2026-06-20):** object/world navigation
+  (find and reach doors/objects/characters) - branch
+  `feature/worldNavigation`, see `docs/modules/world-object-navigation.md`
+  for the staged plan. Stage 1 (coordinate feasibility, debug-log only)
+  implemented, not yet tested live.
 - **Done (merged to main):** Main Menu + Options (feature-plan.md item 2
   and the "Settings/Options" rough feature) - see
   `docs/modules/main-menu-and-options.md`. A few items still pending
@@ -87,7 +92,1012 @@
   tavern lit by candles...") will be hand-written for the fixed intro
   content only, not auto-generated via AI vision (out of scope for now).
 
-## Stopping point - 2026-06-20, round 11 (most recent)
+## Stopping point - 2026-06-21, round 42 (most recent)
+
+Still `feature/worldNavigation`, not yet committed. The door-blocking
+detection finally has a confirmed root cause (not another guess).
+
+- **Real cause found via the diagnostic log added last round**:
+  `freeNodesOnOpen` was length 0 (not null) for both doors tested -
+  the old `== null` guard let it through into an empty `foreach` that
+  could never find anything, for any door in this configuration.
+  `GetDoorWalkablePosition` (already used for routing to a door)
+  already had the right fallback for this - falls back to the door's
+  own transform position when there are no free nodes. Copied that
+  fallback into the new `GetClosedDoorBlockDistance` (refactored from
+  the old bool-returning `IsClosedDoorBlocking`, which now wraps it).
+- **"Bumped a wall near a door, got the item sound" - real bug,
+  fixed**: the door check didn't compare against how close the wall
+  actually was - if a door's threshold was merely in range, it won
+  even when a much closer wall was the real obstacle. `IsBlockedByNonWallItem`
+  now computes both the physics-wall distance and the door distance
+  and picks whichever is actually closer.
+- **Item sound radius**: 4 -> 3 tiles.
+- **Per-item volume**: cama +25%, mesa -40%, via a new
+  `_itemVolumeMultipliers` dict in `CustomSounds.PlayItemNearby` (on
+  top of the shared 60% base volume, untouched for everything else).
+
+Build clean. See `docs/modules/world-object-navigation.md` 33rd round
+entry.
+
+## Stopping point - 2026-06-21, round 41
+  `DebugLogger.LogState` (and siblings) start with
+  `if (!Main.DebugMode) return;` - they don't log unconditionally,
+  contrary to what several past rounds' comments assumed. Round 28's
+  "sound loading is broken" conclusion was wrong - the log just had no
+  lines because F12 came on a few seconds after "Game ready" already
+  fired and loading already ran. Saved to memory
+  (`feedback_debuglogger_gated_by_debugmode`) so future debugging
+  checks debug-mode-on timing before trusting an absent log line.
+- **Main hall door still not triggering all 3 directions**: round
+  40's freeNodesOnOpen fix didn't fully resolve this specific door.
+  Root cause not yet confirmed - added detailed diagnostic logging
+  (node position, distance, dot-product alignment per direction) to
+  `IsClosedDoorBlocking` instead of guessing again blindly.
+- **Item sound radius**: 6 -> 4 tiles (user reported hearing hall
+  tables from the bedroom).
+- **Real bug found in item-bump sound**: `IsBlockedByNonWallItem` only
+  used Physics2D, so a closed door (no collider, same as the ambient
+  sound's earlier bug) could never classify as "item" - bumping a
+  closed door fell through to the wall-bump sound by default,
+  contradicting the user's explicit request that doors count as
+  "item." Fixed by reusing `IsClosedDoorBlocking` here too. Added
+  diagnostic logging to both the tap and sustained bump paths in case
+  something else is still wrong.
+
+Build clean. See `docs/modules/world-object-navigation.md` 32nd round
+entry.
+
+## Stopping point - 2026-06-21, round 40
+
+- **Closed-door ambient sound, real fix this time**: round 39's
+  Door-component exception never actually worked - confirmed via log
+  (standing 0.3 units from a closed door for several seconds, that
+  direction's raycast stayed "nada" throughout). Re-checked decompiled
+  Door.PJMBLECKFLH (the open/close handler) - it only toggles
+  WorldGrid walkability nodes, no Collider2D is touched at all. A
+  closed door has no physics collider at its blocked threshold for
+  Physics2D to ever find, so the raycast approach could never have
+  worked here regardless of filtering logic. Added
+  `IsClosedDoorBlocking()` - checks the door's own `freeNodesOnOpen`
+  positions directly (the same data already used for path/approach
+  positions) instead of relying on physics.
+- **Corridor "only the side I'm facing" report**: investigated but
+  not confirmed - the log segment available showed one side
+  consistently close and the other consistently empty for several
+  seconds, but no proof that spot was actually a 1-tile corridor
+  (could just be open space on that side). Left as open question,
+  asked the user to report a specific no-door location if it recurs.
+  Door.open itself is `protected` (compile error caught this) - used
+  the public property `Door.ECMGCJGPKNO` (decompiled name) instead.
+- **Item proximity sound redesigned into a continuous loop**: was a
+  one-shot tied to the action-prompt UI text. Now: every 1s, any
+  Placeable within 6 tiles with a matching named clip
+  (`CustomSounds.HasItemClip`) plays its sound (pitch for vertical
+  direction, pan for horizontal), staggered 0.3s apart per cycle via a
+  coroutine when multiple matches are close together (explicit
+  request - simultaneous playback was confusing). Old action-prompt
+  one-shot left untouched, this is additive.
+
+Build clean. See `docs/modules/world-object-navigation.md` 31st round
+entry.
+
+## Stopping point - 2026-06-21, round 39
+
+- **Door-in-corridor regression fixed**: round 38's "(Clone)" blocklist
+  (added to stop furniture triggering the ambient wall sound) also
+  excluded doors, since doors are Clone-named too - closed doors
+  stopped triggering the directional wall sound even though they
+  block movement exactly like a wall. Added an exception: a hit with
+  a `Door` component still counts as a wall for this specific ambient
+  sound, even if Clone-named. Plain furniture stays excluded.
+- **Per-item proximity sound**: user provided `baú.wav`/`cama.wav`/
+  `mesa.wav`/`torneira.wav`. `CustomSounds.PlayItemNearby` now looks
+  up a matching clip by item name (substring match) instead of always
+  playing the generic `itens.wav`, and encodes direction via pitch
+  (vertical-dominant: higher = ahead/cima, lower = behind/baixo) or
+  pan (horizontal-dominant: normal pitch, panned left/right) - added
+  `WorldNavigationHandler.GetNearestInteractionTarget()`/
+  `GetNearestInteractionAudioInfo()` to get the interactable's
+  position (previous `GetNearestInteractionName()` only had the name).
+- **Distinct "bumping into a non-wall item" sound**: user provided
+  `batendo em item.wav`. Added `IsBlockedByNonWallItem()` (same
+  "(Clone)" signal as the ambient sound, but WITHOUT the door
+  exception - per the user's explicit request, doors count as "item"
+  here, not wall) - both the single-tap and sustained-stuck bump
+  handlers now pick wall-bump vs item-bump sound based on what's
+  actually blocking the attempted movement direction.
+
+Build clean, all new files (including accented "baú.wav" and spaced
+"batendo em item.wav") confirmed copying to Mods. See
+`docs/modules/world-object-navigation.md` 30th round entry.
+
+## Stopping point - 2026-06-21, round 38
+diagnostic logs added last round) that loading itself is fine, 7
+clips load every session including this one.
+
+Found the real cause: log showed 172 directional wall checks this
+session, zero hits - even near "WallBack", which used to fire
+correctly. Round 27's fix (require a `PhysicalSpaceWall` component to
+count as a wall, meant to stop the bed from triggering it) excluded
+real walls too, not just furniture - a wrong assumption, caught by the
+same project habit of checking the log before trusting a fix.
+Switched to the opposite approach: blocklist instead of allowlist -
+exclude any hit whose root name contains "(Clone)" (Unity's suffix for
+runtime-`Instantiate()`'d objects, which furniture/decorations are;
+static level geometry like walls isn't instantiated, so it never has
+this suffix - confirmed against both the bed and "WallBack" in the
+log).
+
+Build clean. See `docs/modules/world-object-navigation.md` 29th round
+entry.
+
+## Stopping point - 2026-06-21, round 37
+this round.
+
+Investigated via log BEFORE changing anything (project rule). Found:
+this session's log has zero "CustomSounds:" lines at all - not even
+"loaded parede.wav", which logged in every prior session, including
+ones from before the volume change. This means sound loading itself
+stopped happening - the 60% volume value isn't the cause (that
+wouldn't go silent, just quieter). Root cause not yet known. Added
+unconditional diagnostic logs at `CustomSounds.EnsureLoaded` and the
+start of the `LoadAll` coroutine, plus a try/catch around the call in
+`Main.cs`, to pin down exactly where the chain breaks next session -
+deliberately did NOT touch the volume value or guess at a fix without
+evidence, per the user's own request for caution with small audio
+tweaks plus the standing project rule (confirm via log before
+concluding a cause).
+
+Build clean. See `docs/modules/world-object-navigation.md` 28th round
+entry.
+
+## Stopping point - 2026-06-21, round 36
+
+- **Directional wall sound false positive fixed**: log showed "cima"
+  was hitting the bed (`1130 - Cama del Jugador(Clone)`, dist=0.28),
+  not a wall - the raycast counted any solid collider, including
+  furniture. Found a dedicated `PhysicalSpaceWall` component the game
+  itself uses (for camera-occlusion wall fading) and now only count
+  hits that have it.
+- **"Sem rota ainda" fallback fixed to single-axis**: was joining both
+  axes into one sentence ("4 pra esquerda, 3 pra baixo") - now shows
+  only the larger axis, matching the real step system's one-at-a-time
+  format. Also found (while fixing this) it never divided by TileSize
+  - was speaking double the real telha count. Fixed both.
+- **`maxNodes` raised 1500 -> 2500**: log proved the 1500 cut (made a
+  few rounds ago for speed) was now causing genuine "no route"
+  failures for longer distances - "Bar" failed repeatedly while far
+  away (even with the new retry) and only succeeded once the player
+  walked close. Not a blocked path, a search budget that was too
+  small.
+- **Wall sound volume -> 60%** and **4 distinct wall clips** (user
+  provided `cima.wav`/`direita.wav` to go with existing
+  `baixo.wav`/`esquerda.wav`, replacing the old shared file) per
+  direct request.
+
+Build clean. See `docs/modules/world-object-navigation.md` 27th round
+entry.
+
+## Stopping point - 2026-06-21, round 35
+added a pathfinding retry so blocked destinations (closed doors) still
+get step-by-step guidance instead of falling back to the old
+straight-line message.
+
+- **4 distinct wall clips**: `cima.wav`/`direita.wav` are new (user
+  provided this round); `baixo.wav`/`esquerda.wav` already existed.
+  Replaced the old shared "cima direita e esquerda.wav" file entirely
+  - `CustomSounds` now has one clip field per direction, `.csproj`
+  copy list updated to match.
+- **Pathfinding retry for blocked destinations**: user insisted
+  guidance should always come in steps, even toward something
+  currently blocked (e.g. a closed door, whose threshold tile the
+  game only marks walkable while open - confirmed several rounds
+  ago). `OnPathComputed` now retries once on failure, aiming at a
+  point nudged one tile back toward the player along the same line -
+  since usually only the very last tile is what's blocked, this
+  should land on an already-walkable node and give real step
+  guidance up to (not through) the obstruction. Falls back to the
+  honest "Não encontrei uma rota até lá." only if the retry also
+  fails.
+
+Build clean. See `docs/modules/world-object-navigation.md` 26th round
+entry.
+
+## Stopping point - 2026-06-21, round 34
+attempt, and added a small grace period for audible pauses.
+
+- **Wall sound detection rewritten**: the single fixed-distance
+  OverlapCircle point missed walls closer than that distance (a
+  narrow 1-tile corridor's walls sit much closer than a full tile),
+  and a plain `Raycast` only reports the nearest hit - very likely the
+  player's OWN collider, since the ray starts at the player's
+  position, hiding any real wall beyond it (plausible explanation for
+  up/down never firing, depending on the player collider's shape).
+  Switched to `Physics2D.RaycastAll` along the whole direction up to
+  ~1.2 tiles, picking the closest hit that isn't the player and isn't
+  a trigger - covers both very-close (corridor) and one-tile-away
+  (open room) walls.
+- **Grace period added**: `WallSoundOffDelay` (0.15s) - a direction
+  keeps playing for a brief window after its last positive detection,
+  to smooth over single-frame detection flicker (a plausible cause of
+  the reported audible "pauses"). If pauses persist after this, it's
+  more likely the WAV file itself has a small silence baked into its
+  loop point - not something fixable in code, would need a re-trimmed
+  file.
+- Confirmed (no new code) that "non-door objects not getting step
+  guidance" is the same already-explained limitation from last round
+  (only happens when pathfinding genuinely fails for that specific
+  destination) - asked the user to name a specific object next time if
+  they're sure it has a free path.
+
+Build clean. See `docs/modules/world-object-navigation.md` 25th round
+entry.
+
+## Stopping point - 2026-06-21, round 33
+the directional wall-proximity sound (experimental, needs live
+testing), and added a diagnostic for the one case that looked like a
+real bug ("Torneira" failing pathfinding without being behind a door).
+
+- **"Escadaria"/closed targets confirmed not a list bug**: log shows
+  it DOES appear in the list and gets guidance attempts - pathfinding
+  itself just consistently returns no route, matching the user's own
+  theory (still locked/blocked, same mechanism as a closed door's
+  threshold tile not being walkable yet).
+- **"Two directions instead of steps" explained**: only happens when
+  `PathRequestManager` genuinely returns no route - confirmed in log
+  this is 1:1 with destinations that have no walkable path at all
+  right now. Not fixable without a route existing; can't fabricate
+  steps for a path that doesn't exist.
+- **`GetApproachPosition` diagnostic logging added**: to find out if
+  "Torneira" (not door-gated) failing pathfinding is the same kind of
+  bug as the earlier barrel issue (approach point landing somewhere
+  unwalkable) - logs the computed point for every Placeable target.
+- **Directional wall sound - phase 1 implemented (experimental)**:
+  using the user-provided `baixo.wav` (down) and `cima direita e
+  esquerda.wav` (up/left/right, panned/centered) - checks all 4
+  cardinal directions every frame via `Physics2D.OverlapCircle`
+  (Unity's own physics, not a guessed game-internal function -
+  confirmed `Utils.EJPFCKFEMJF`, the pathfinding `avoidWalls` check,
+  only tests `position.y > 800f` and would have been another wrong
+  guess) and loops the matching clip per direction, multiple at once
+  (e.g. a corner). New `CustomSounds.SetDirectionalWallSound`/
+  `StopAllDirectionalWallSounds`. Genuinely untested against the
+  game's real collider setup - flagged for live testing before
+  trusting it. Phase 2 (door proximity loop) not started yet.
+
+Build clean. See `docs/modules/world-object-navigation.md` 24th round
+entry.
+
+## Stopping point - 2026-06-21, round 32
+outside the tavern building no longer show until the player leaves
+it), and analyzed (not yet implemented - no sound files provided yet)
+a directional wall/door proximity sound feature.
+
+- **Location filter added** to `BuildTargetList()`: items whose
+  `Utils.HJPCBBGHPDA` Location differs from the player's current one
+  are removed from the list. Confirmed the cellar shares the tavern's
+  Location (never triggered the existing cross-area fallback message
+  in past logs), so closed-but-reachable items like the cellar door
+  still show, while genuinely outside-the-building items don't until
+  the player actually leaves. Does NOT pathfind-check every item
+  (too expensive to run per-candidate) - a truly "no path exists at
+  all" filter is still not implemented.
+- **Sound design analysis (no code yet)**: user wants a directional
+  wall-proximity loop (pan left/right, pitch up/down) plus a door
+  proximity loop, to give an "echolocation"-like sense of room shape -
+  gaps in the wall sound double as corridor/opening signals, so no
+  separate corridor-detection system is needed (matches the user's
+  own observation). Investigated `Utils.EJPFCKFEMJF` (used by
+  pathfinding's `avoidWalls`) as a possible "is this a wall" check -
+  ruled out, it only checks `position.y > 800f`, unrelated to
+  collision (same class of wrong-guess as last round's IProximity
+  mistake). Recommended approach instead: Unity's own
+  `Physics2D.Raycast` in the 4 cardinal directions, independent of
+  guessing the right internal game function - same principle as the
+  already-working reactive wall-bump sound (measures real movement,
+  not an internal flag). Waiting on the user to provide the actual
+  sound files before implementing.
+
+Build clean. See `docs/modules/world-object-navigation.md` 23rd round
+entry.
+
+## Stopping point - 2026-06-21, round 31
+and loosened the step-advance threshold back, since the tighter value
+caused a worse regression (permanent oscillation on a short chest leg).
+
+- **IProximity revert**: user reported "Você chegou" firing instantly
+  for the door, confirmed in log (~1.7s after "Calculando rota...",
+  nowhere near the target). Read `Placeable.IsAvailableByProximity`
+  and `Door.IsAvailableByProximity` in decompiled source - despite the
+  name, neither checks player distance at all (pickup eligibility,
+  decoration-mode state, rental-zone occupancy instead). Fully
+  reverted to the geometric distance-based arrival check; removed the
+  now-unused `GameObject source` field from the target tuple and
+  `_selectedTarget` (was only added for this).
+- **Step-advance threshold loosened back**: the chest leg from last
+  round's log was still stuck oscillating "1 pra direita"/"1 pra
+  esquerda" for over a minute - real distance was hovering between
+  0.17 and 0.49, frequently above the 0.15 threshold tightened 2
+  rounds ago. Reverted to 0.25 (matches the rounding boundary used for
+  the spoken count itself).
+- Asked the user whether to invest in the bigger checkpoint/fixed-
+  coordinate redesign now, given the back-and-forth on short-leg
+  precision - question was declined/interrupted; holding off, no
+  redesign started.
+
+Build clean. See `docs/modules/world-object-navigation.md` 22nd round
+entry.
+
+## Stopping point - 2026-06-21, round 30
+event (per user suggestion), added a per-step tap-vs-announced-count
+log, fixed a real "0 pra baixo" edge case, and shortened the wall-tap
+sound again.
+
+- **Re-audit**: re-read the WorldGrid step size, Door.freeNodesOnOpen,
+  and axis-count logic - all still check out. The actual weak point is
+  `GetApproachPosition` (last round's geometric guess for
+  non-door objects) - an approximation, unlike the door's exact data.
+- **"Chegou" now event-based, not distance-based**: confirmed nearly
+  every interactable type in this game (`Placeable`, `Door`,
+  `FloorDirt`) implements `IProximity.IsAvailableByProximity(int)` -
+  the same authoritative signal the game itself uses to decide whether
+  to show the "[E]/[Q] ..." prompt. `BuildTargetList()`'s tuple grew a
+  `GameObject source` field (and `_selectedTarget` correspondingly) so
+  `BuildStepGuidanceMessage` can ask the target directly "can you be
+  interacted with right now?" before falling back to geometry. Should
+  fix the door-works-chest-doesn't inconsistency, since the chest never
+  had door-quality exact position data to lean on.
+- **Tap-vs-count diagnostic log added**: per user's explicit request,
+  every time a step completes, logs "número pedido=X, toques de
+  movimento usados=Y" - lets calibration be checked from hard numbers.
+- **"0 pra baixo" fixed**: the stricter `StepAdvanceThreshold` from
+  last round left a gap where raw distance already rounds the spoken
+  count to 0 but hadn't crossed the (smaller) advance threshold yet -
+  confirmed plausible and matches the report exactly. Spoken count now
+  floors at 1, never 0.
+- **Wall-tap sound**: 0.2s -> 0.26s per request.
+- Still holding off on a checkpoint/fixed-coordinate redesign - testing
+  whether the proximity-event fix resolves the chest-specific
+  inconsistency first.
+
+Build clean. See `docs/modules/world-object-navigation.md` 21st round
+entry.
+
+## Stopping point - 2026-06-21, round 29
+arrival), reduced the A* search budget to speed up route calculation,
+and shortened the wall-tap sound again.
+
+- **Step advanced too early - fixed**: user reported moving just a
+  little and already getting redirected. Cause: the advance-to-next-
+  step check reused the already-ROUNDED spoken count (`<= 0`), so
+  anything within a quarter tile counted as "done" early. Decoupled:
+  added `ComputeAxisDistance` (raw, unrounded) and a tighter
+  `StepAdvanceThreshold` (0.15, vs. the up-to-0.25 slack rounding
+  allowed) used only for deciding when to switch steps - the spoken
+  number still rounds normally.
+- **Chest arrival needed multiple tries - addressed**: `GetApproachPosition`
+  (added last round) pushed the target a half tile past the collider
+  edge - farther out than where the player actually stops to interact.
+  Reduced the buffer to a quarter tile.
+- **Route calculation speed**: confirmed in decompiled `PathRequestManager`
+  the 1+ second wait isn't queue overhead (background loop polls every
+  1ms) - it's genuine A* search time, bounded by `maxNodes`. Halved
+  from 3000 to 1500. Trade-off: faster for normal in-tavern distances,
+  but a long/complex enough route could now fail where it didn't
+  before - flagged for the user to watch for in this round's testing.
+- **Wall-tap sound**: 0.3s -> 0.2s per request.
+
+Build clean. See `docs/modules/world-object-navigation.md` 20th round
+entry.
+
+## Stopping point - 2026-06-21, round 28
+distance kept growing" (stale per-chunk direction label, never
+recomputed from current position), generalized the door
+walkable-position fix to ordinary objects (barrel was unreachable -
+registered position was inside its own collider), removed the useless
+"Continuando..." message, and shortened the wall-tap sound again.
+
+- **Tile count confirmed correct (not a bug)**: used the exact
+  player/endpoint positions added to the log last round to hand-verify
+  several "X pra baixo/esquerda" lines - all matched 0.5 world units =
+  1 tile exactly. The user's "conte direito as telhas" complaint
+  turned out to be a symptom of the direction bug below, not the count
+  itself.
+- **Stale direction bug found and fixed**: `SimplifyPath` assigns each
+  chunk's direction ONCE, from the path's original traversal. If the
+  player overshoots a chunk's end point (ends up on the far side), the
+  distance correctly grows as they keep moving the "wrong" way, but
+  the spoken direction stayed frozen at the original label - so it
+  kept saying "direita" while the real fix was to go back ("esquerda")
+  - confirmed exactly in log (pos.x growing past end.x while still
+  announcing "direita"). Added `GetLiveDirection()`, which recomputes
+  the spoken direction from the player's current position every time,
+  never trusting the precomputed label.
+- **Generic objects with unreachable target position - fixed**: log
+  showed a barrel target NEVER found a route (over a minute of
+  "Pathfinding returned no route") - registered position was inside
+  the object's own solid footprint, same class of bug as last round's
+  door fix but for ordinary `Placeable`s. `GetApproachPosition()`
+  nudges the target to just outside the object's `Collider2D` bounds,
+  toward the player, instead of using the raw transform position.
+  Needed a new `UnityEngine.Physics2DModule` reference in the .csproj
+  for `Collider2D`.
+- **"Continuando..." removed**: user said it told them nothing
+  actionable. Steps now advance immediately once their own axis is
+  satisfied (using the same axis-only measure as the spoken count),
+  and the final step now resolves whichever axis (or both) still has
+  distance left instead of stalling.
+- **Wall-tap sound shortened again**: 0.5s -> 0.3s per request.
+- Declined (for now) the suggestion to redesign navigation around
+  fixed checkpoints/area coordinates - the two bugs found this round
+  plausibly explain most of the reported inconsistency; recommended
+  testing this fix first before a bigger rework.
+
+Build clean. See `docs/modules/world-object-navigation.md` 19th round
+entry.
+
+## Stopping point - 2026-06-21, round 27
+wall-tap sound duration, made guidance auto-disable on arrival, and
+confirmed (not guessed) that closed doors legitimately block
+pathfinding by design - not a bug.
+
+- **"Two routes" bug - confirmed and fixed via log**: log showed the
+  exact timing - "Calculando rota..." spoken, then 8ms later "9 pra
+  baixo, 2 pra esquerda" spoken over it. `HandleGuidanceUpdate` runs
+  every frame once guidance is active, and its first call always
+  passes the movement-delta check (no prior position to compare yet),
+  landing on the old straight-line fallback message BEFORE the real
+  route (~1.2s round-trip) came back. Fixed: that update now stays
+  silent while `_isInitialPathRequest` is true; `OnPathComputed`
+  already announces the real first step once ready.
+- **Chest "Vazio" - confirmed via log, fixed for real this time**:
+  the diagnostic added two rounds ago proved the item WAS found
+  (`item=itemMop`) but `LocalisationSystem.Get(item.nameId)` came back
+  empty anyway. Root cause in decompiled `Item.cs`: some items use
+  `translationByID`, which looks up a different key
+  (`"Items/item_name_" + id`), not `nameId` directly - `Item` itself
+  has a public method (`IABAKHPEOAF()`) that already knows this and
+  falls back to the raw asset name if no translation exists at all.
+  Swapped both lookup sites (`DescribeSlotUI` in
+  `KeyboardUINavigator.cs`, `DescribePlaceable`'s itemSetup lookup in
+  `WorldNavigationHandler.cs`) to call that instead of looking up
+  nameId directly.
+- **Wall-tap sound shortened**: user reported it playing "too much"
+  when testing rapid taps against a wall - each tap played the full
+  1s minimum, overlapping. Halved to 0.5s.
+- **Guidance auto-disables on arrival**: saying "Você chegou" now also
+  turns guidance off, instead of needing a separate Home press.
+- **Closed doors blocking pathfinding - confirmed by design, not a
+  bug**: found in decompiled `Door.cs` that a door's walkable
+  threshold tile(s) (`freeNodesOnOpen`) only become walkable in the
+  grid while the door is OPEN - closed doors genuinely block the A*
+  search, same rule the game's own NPCs follow. Matches the user's own
+  suspicion about the cellar door. "Não encontrei uma rota até lá." is
+  confirmed (via log) to already speak in this case - never silent.
+- **Tile-count calibration still open**: user couldn't confirm whether
+  announced counts are double, half, or something else vs. real
+  distance. Added exact player/endpoint world positions to the
+  per-announcement debug log so the next round's log can be measured
+  directly instead of guessed.
+
+Build clean. See `docs/modules/world-object-navigation.md` 18th round
+entry.
+
+## Stopping point - 2026-06-21, round 26
+distance, fixed doors using their real walkable tile instead of the
+bare transform position, and added a fast off-track reroute.
+
+- **Single-tap wall sound - real bug found**: the old design only
+  evaluated a tap on a frame where NO movement key was held - rapid
+  tapping almost never produces such a frame, so that check almost
+  never ran. What the user actually heard was the unrelated sustained
+  loop, accumulating stuck-time across the gaps between taps until it
+  crossed 0.6s (hence "needs 6+ taps"). Fixed: each key-down now
+  schedules its own independent check 0.15s later, regardless of
+  hold/release state.
+- **Wall sound minimum duration**: `PlayWallBumpOnce` now loops the
+  clip and cuts it at a fixed 1s minimum, since the wav itself is
+  shorter than what the user wants to hear.
+- **Guidance activation flow fixed**: confirmed the bug - turning
+  guidance on spoke the OLD straight-line fallback message first
+  (premature, before the real route existed), then the real route a
+  moment later. Now says "Calculando rota..." immediately and "Rota
+  calculada. [first step]" once the route actually arrives - and only
+  on activation, not on every background refresh while walking.
+- **Step counts now axis-only**: each step's remaining count measures
+  only the axis its direction refers to (e.g. a "cima" step only
+  looks at vertical distance), instead of straight-line distance to
+  its endpoint - sideways drift no longer skews an unrelated count.
+- **Doors use their real walkable tile**: found `Door.freeNodesOnOpen`
+  (public `Vector2[]`) in decompiled source - per-instance offsets
+  marking the door's actual walkable threshold tile(s), separate from
+  the door's bare `transform.position` (which isn't necessarily
+  walkable at all). `GetDoorWalkablePosition()` now uses whichever
+  offset is closest to the player. Likely the real cause of "says
+  still up while standing on the door."
+- **Faster off-track correction**: `HandleGuidanceUpdate` now also
+  forces an immediate reroute (bypassing the 6s cooldown) once
+  perpendicular drift from the current step's line gets too large,
+  instead of waiting for the next periodic refresh.
+
+Build clean. See `docs/modules/world-object-navigation.md` 17th round
+entry.
+
+## Stopping point - 2026-06-21, round 25
+(fixes the jittery/increasing numbers), added diagnostics for the two
+unconfirmed issues (chest "Vazio", single-tap wall sound), and answered
+the camera/rotation question directly from decompiled source.
+
+- **Bark filter bug found**: round 23 removed the `continue` that
+  muted ambient barks (to fully open the filter hunting for the cat's
+  line); round 24 only narrowed the name list back down without
+  restoring that `continue` - so narrowing the list did nothing
+  (confirmed in log: BuzzNPC/DoorNPC kept getting announced). Fixed -
+  the skip is back, scoped to "BuzzNPC"/"DoorNPC"/"Mudanza" only.
+- **Guidance redesigned into step-chunks**: confirmed in log that
+  round 24's grid-snap fix DID work (`path=True`, "Pathfinding
+  succeeded" appearing regularly), but announced numbers jumped
+  around/increased - caused by re-requesting a fresh route every 2s
+  (resetting progress each time) combined with a very granular raw
+  path (one point per 0.25 units). `SimplifyPath()` now collapses the
+  raw `Vector2[]` into cardinal-direction chunks; `AnnounceFullPlan()`
+  speaks the whole plan once when a route arrives ("Rota: 4 pra cima,
+  3 pra direita, 2 pra baixo"), then `AnnounceDirectionToSelectedTarget()`
+  just counts down within the current chunk. Re-request cooldown raised
+  from 2s to 6s (safety-net refresh only, not constant).
+- **Diagnostics added** (no behavior change) for two issues we lack
+  hard evidence for: `DescribeSlotUI` now logs the slot/itemInstance/
+  item lookup chain (to confirm whether a "Vazio" chest is real or a
+  bug), and `HandleSingleTapWallBump` now logs held-duration/moved-
+  distance vs threshold (to confirm whether single-tap detection or
+  key choice - WASD vs arrows - is the actual issue).
+- **Camera/rotation question answered**: confirmed via the `Direction`
+  enum used throughout the game's movement/animation system - fixed
+  top-down view, character only ever faces 4 cardinal directions, no
+  free mouse-rotation exists. No "align with north" need.
+
+Build clean. See `docs/modules/world-object-navigation.md` 16th round
+entry.
+
+## Stopping point - 2026-06-21, round 24
+text, single-tap wall sound, and narrowed the bark filter back down.
+
+- **Pathfinding root cause found**: confirmed via log that round 23's
+  integration NEVER succeeded a single request (`path=False` always,
+  even 3-tile distances) - silently falling back the whole time.
+  Cause: the game's A* works with positions snapped to a 0.25-unit
+  grid (`Utils.MJEACANINDN`); passing raw player/target floats meant
+  the algorithm's goal-equality check never matched, so it always
+  exhausted its search. Fixed by snapping both start/goal through that
+  same function before requesting. Needs a real test to confirm.
+- **Reverted**: chest contents on Page Up/Down (user prefers the
+  game's own container UI, which already opens as a list correctly).
+- **Fixed the REAL container UI instead**: confirmed the actual bug -
+  `KeyboardUINavigator` was reading slot buttons' generic GameObject
+  name ("New SlotUI Inventory") instead of the contained item, with
+  one slot reading nothing. Added a `SlotUI`-aware label reader
+  (`SlotUI.IHENCGDNPBL` exposes the underlying `Slot`/`ItemInstance`
+  publicly) - reads the real item name or "Vazio".
+- **Wall-bump single-tap**: a quick tap into a wall produced no sound
+  (only sustained holding did). Added independent raw-WASD-key
+  down/release tracking so a short tap with near-zero displacement
+  also gets a one-shot sound; raised the sustained-hold confirmation
+  delay by ~100ms (0.5s -> 0.6s) per request.
+- **Bark filter narrowed back down**: opening the filter fully last
+  round didn't surface the cat's line either (confirmed in log - the
+  "Mudanza" family appeared once unfiltered, the cat never did, in
+  either state) - re-filtered only "BuzzNPC"/"DoorNPC"/"Mudanza"
+  specifically, leaving all other NPC barks audible. Cat dialogue
+  remains unexplained - not Bark UI, not a dialogue response, not
+  scanned UI/world text either. Asked the user for the exact trigger
+  (interacting? walking by? a specific story beat?) to narrow the
+  search instead of guessing further blindly.
+
+Build clean. See `docs/modules/world-object-navigation.md` 15th round
+entry.
+
+## Stopping point - 2026-06-21, round 23
+quest tagging, and ambient-bark filter temporarily disabled.
+
+- **Real pathfinding wired up**: `PathRequestManager.RequestPath`
+  (the game's own threaded A*, already used for NPCs) is now called
+  from `HandleHomeKey`/`HandleGuidanceUpdate`, wrapped in try/catch
+  (confirmed via decompiled source the only likely failure - the
+  internal static instance not being ready - throws synchronously on
+  our calling thread, not the background one, so it's safely
+  catchable). Confirmed the callback fires on the main thread via
+  `PathRequestManager.Update()` draining its own result queue - safe
+  to touch our state there. Guidance now walks the returned waypoint
+  list instead of a straight-line delta; falls back to the prior
+  "different area, can't tell you a number" honesty message only
+  when no path is available yet.
+- **Duplicate "door" entries fixed**: confirmed same physical door
+  was appearing twice (once via `Door`, once via `Placeable` with a
+  "Cellar Door"/"Puerta" name) at near-identical coordinates. Dedup
+  pass added to `BuildTargetList()`: same category + within half a
+  tile of an already-kept entry is dropped.
+- **Container contents now announced**: confirmed `Container.slots`/
+  `Slot.itemInstance` are public in decompiled source - selecting a
+  Container-category target now reads its name AND current contents
+  (or "vazio").
+  Helps the user actually find which container has a quest item.
+- **Dirty tables tagged "Missão" too**: confirmed via decompiled
+  `Table.cs` (separate component from `Placeable`, with a public dirt
+  level property) - not just floor stains anymore.
+- **Ambient NPC bark filter disabled (temporarily, by request)**: the
+  cat's missing final line never showed up even in last round's
+  filtered-but-logged diagnostic - user asked to remove the filter
+  entirely to actually hear everything. Re-enabled the "Conversa ao
+  redor:" prefixed announcement path that already existed but was
+  short-circuited. Expect noisier ambient chatter again until this is
+  revisited.
+- **Explained, not a bug**: the unexpected ambient dialogue lines
+  (BuzzNPC/DoorNPC under a "Mudanza" object) are a scripted
+  moving-family event somewhere in the loaded scene, not visible to
+  the player - our scanner reads the whole scene's text, not just
+  what's near the character.
+
+Build clean. See `docs/modules/world-object-navigation.md` 14th round
+entry.
+
+## Stopping point - 2026-06-20, round 22
+
+- **New "Missão" category**: floor stains (`FloorDirt` - confirmed a
+  different component type from `Placeable`, that's why they were
+  missing) now show up there. Only floor dirt covered so far, not a
+  generic "whatever the active quest needs" mapping for future quests.
+- **"Grifo" mistranslation fixed**: confirmed via log
+  ("DrinkDispenserUI"/"ContentBeerTap") it's a drink dispenser tap,
+  not a sink faucet - changed to "Dispenser de Bebidas".
+- **Direction ordering**: now says the axis with the LARGER distance
+  first (e.g. "3 baixo, 1 direita"), per explicit request - order
+  only, doesn't add real wall-avoidance (separate larger ask, still
+  not implemented).
+- **Cat dialogue / table message**: checked this session's log,
+  found zero trace of the cat's line (filtered or announced) - likely
+  wasn't re-triggered in this test, not a filter regression. Confirmed
+  the table's "[Q] Limpar" prompt WAS read - if the user means a
+  different message (e.g. after finishing cleaning), need to know
+  exactly when it appears to investigate further.
+
+Build clean. See `docs/modules/world-object-navigation.md` 13th round
+entry.
+
+## Stopping point - 2026-06-20, round 21
+
+- **"Decorativos" category fix**: doors/stairs without a `Door`
+  component (`Puerta`, `Cellar Door`, `Escalera Arriba` - Placeable,
+  not Door, which is why they landed there) reclassified into
+  "Portas". "Decorativos" now means purely cosmetic (window, vase)
+  per user's correction.
+- **Table-cleaning message not read**: text scan was
+  `TextMeshProUGUI`-only (UI text). Widened to `TMP_Text` (common
+  base, also covers world-space floating text) in both
+  `DialogueAnnouncer` and `UITextExtractor`.
+- **Cat's last line not read - diagnosed, not yet fixed**: likely the
+  same "ambient NPC bark" filter (added per user request to silence
+  noisy background chatter) also catching this one-off, narratively
+  meaningful reaction. Added debug-mode logging of filtered bark text
+  so next round can confirm before changing the filter's behavior.
+- **"Messy coordinates" / guidance into walls**: root cause confirmed
+  structural - Home-key guidance is a straight-line XY delta, no
+  pathfinding, so it's meaningless once the target is in a different
+  game `Location` (not geometrically continuous with the player's
+  current area). Investigated the game's own `PathRequestManager`
+  (threaded A*, queue+callback API) - technically viable but a
+  separate, bigger, riskier feature (project rule: never wire up a
+  game system without confirming safety first). Implemented a safer
+  partial fix instead: detect cross-area targets via
+  `Utils.HJPCBBGHPDA(Vector2)` and say so explicitly instead of
+  giving a misleading delta. Real obstacle-avoiding pathfinding within
+  the same area is still not implemented - flagged as a future, larger
+  ask.
+
+Build clean. See `docs/modules/world-object-navigation.md` 12th round
+entry.
+
+## Stopping point - 2026-06-20, round 20
+
+- **Category list now defaults to "Portas"** instead of opening with
+  everything lumped together (confirmed bug from round 19's feature).
+- **Item names**: confirmed via log that every Placeable without
+  itemSetup.item is pure scenery with no localization data - its name
+  IS the original Spanish asset name. Added a small translation table
+  for the specific Spanish strings actually observed in the log (not
+  a guessed generic dictionary) - Grifo, Malteadora, Trapo Colgado,
+  Grupo Ladrillos, Cajas Apiladas, Lateral Habitacion, Escalera
+  Arriba, Horno Variant, Mesa de Cocina Variant, Ventana de Madera,
+  Puerta, Cofre Pequeño, Cama del Jugador, Barril de Servicio, Cellar
+  Door. The "Cacto" mislabeled torch (round 19) is unrelated bad game
+  data, not a fallback-translation case - still unfixed.
+- **Footstep cadence clarified**: the per-half-tile trigger was
+  already correct since the first version - the cadence was never the
+  problem, the native audio routing was (see round 19). Still no
+  footstep sound until a dedicated `.wav` is provided.
+- **New: direction-change sound**. User noticed the character turns
+  to face a direction before moving - confirmed via
+  `PlayerController.GetPlayerDirection(1)` (real-time `Direction`
+  enum: Up/Down/Left/Right/Diagonal). Added `stand.wav` (loaded same
+  way as parede.wav/itens.wav) played on every facing change, panned
+  via `AudioSource.panStereo`: -1 for Left, +1 for Right, 0 for
+  Up/Down/Diagonal.
+
+Build clean, all 3 .wav files confirmed copied to Mods folder. See
+`docs/modules/world-object-navigation.md` 11th round entry.
+
+## Stopping point - 2026-06-20, round 19
+
+- **Footstep root cause properly confirmed (decompiled, not guessed)**:
+  used `ilspycmd` to decompile `AlmenaraGames.MultiAudioManager`/
+  `AudioObject` from `Assembly-CSharp-firstpass.dll`. Confirmed the
+  AudioClip selection always succeeds (no "doesn't have a valid Audio
+  Clip" warning ever logged) - the silence comes from this 3rd-party
+  plugin's own multi-listener/distance-volume system, not missing data.
+  Per user request, removed the reused click sound for footsteps
+  entirely (no replacement) - needs a dedicated `.wav` from the user if
+  they want a footstep sound.
+- **Wall-bump sound**: switched from discrete retriggers (0.6s cooldown)
+  to a continuous loop that starts when the player gets stuck and stops
+  the instant they're not. Stuck-confirmation delay set to 0.5s per
+  request.
+- **Filtered ghost list entry**: a `Placeable` with no `SpriteRenderer`
+  ("BarManager", a manager script, not a physical object) was appearing
+  in the navigation list - now skipped.
+- **Found (not fixed)**: a wall torch resolves to the localized name
+  "Cacto" via its Item's nameId - looks like bad source data in the
+  game itself, not a bug in our lookup code.
+- **Found for later**: `Container.cs` has `Slot[] slots` with real
+  `Item` references inside - technically enables a future "peek inside
+  a specific chest" feature (relevant to the user's "esfregão" ask),
+  not implemented this round.
+- **Category grouping implemented**: `Ctrl+Page Up/Down` cycles category
+  (announces "Categoria: X (N)"), `Page Up/Down` now navigates within
+  the current category. Categories: Portas, Containers, Máquinas,
+  Coletáveis, Decorativos - classified by real component types
+  (`Container`, `Crafter`, `Placeable.canBeAddedToInventory`).
+
+Build clean. See `docs/modules/world-object-navigation.md` 10th round
+entry.
+
+## Stopping point - 2026-06-20, round 18
+
+Still `feature/worldNavigation`, not yet committed. Gave up on the
+game's native footstep audio system after a 3rd confirmed dead end,
+switched to the user's own sound files, improved item-name
+diagnostics, and clarified scope on the "find item inside chest" ask.
+
+- **Footstep native audio abandoned**: 3 separate fixes (cooldown
+  reduction, disabling native timer, replicating per-zone override
+  list) all confirmed the trigger fired correctly but never produced
+  audible sound through `MultiAudioManager`/`Footsteps`. Root cause
+  still unknown and not worth a 4th blind attempt - footsteps now use
+  `UISound.PlayNavigate()` instead, a clip already proven reliable
+  elsewhere in this mod.
+- **New: `CustomSounds.cs`** - loads user-provided `parede.wav` /
+  `itens.wav` (dropped in the project root) via
+  `UnityWebRequestMultimedia`, plays them through a throwaway
+  `AudioSource` (spatialBlend 0) independent of the game's own audio
+  systems. `.csproj` updated: new `UnityWebRequestModule`/
+  `UnityWebRequestAudioModule` references, and the post-build copy
+  step now also copies both `.wav` files to Mods folder. Wall-bump
+  and item-proximity sounds now use these instead of `UISound`.
+- **Item names still cryptic for some objects** - added diagnostic
+  logging distinguishing "got it from itemSetup.item" vs "fell back
+  to GameObject name parsing", to confirm next round whether
+  decorative Placeables (furniture, etc.) just don't have an
+  associated `Item` at all, rather than guessing a 3rd naming
+  strategy blind.
+- **Clarified, not fixed**: finding which specific chest contains a
+  quest item ("o esfregão") needs a different feature (peeking
+  container contents) - improving the chest's OWN name doesn't help
+  with that, told user explicitly instead of attempting a guess.
+
+Build clean (verified the .wav files land in Mods folder after
+build). See `docs/modules/world-object-navigation.md` 9th round entry.
+
+## Stopping point - 2026-06-20, round 17
+
+Still `feature/worldNavigation`, not yet committed. Resolved the
+footstep mystery (3 rounds pending), improved item names, and shipped
+a first wall-bump sound attempt.
+
+- **Footstep root cause found**: log confirmed the distance trigger
+  was firing correctly every tile - the issue was always the SOUND
+  selection, not the trigger. `FootstepObjectSound.cs` revealed the
+  game registers custom per-zone clips into a private list
+  (`Footsteps.PMPPEAHDDAB`) and only falls back to the generic
+  `stepsWood`/`stepsDirt` fields when that list is empty - which are
+  apparently unset placeholders in this game (all real footstep audio
+  comes from zone overrides). Fixed by checking that list first via
+  reflection.
+- **Item names improved**: `Placeable.itemSetup.item.nameId` is a
+  localization key (same pattern as Encyclopedia titles) - now used
+  via `LocalisationSystem.Get()` instead of parsing the GameObject
+  name, which produced cryptic results for some items.
+- **Wall-bump sound implemented** (first attempt): no existing game
+  signal for "blocked movement" found, so it compares real
+  frame-to-frame displacement against the expected minimum for
+  `PlayerController.speed` while `moving` is true - reuses
+  `UISound.PlayBoundary()`. Empirical thresholds, flagged to user as
+  needing live tuning.
+
+Build clean. See `docs/modules/world-object-navigation.md` 8th round
+entry.
+
+## Stopping point - 2026-06-20, round 16
+
+Still `feature/worldNavigation`, not yet committed. User clarified one
+"bug" from last round wasn't real, and reported a regression caused
+by last round's actual fix, plus a separate genuine filter bug.
+
+- **Reverted the Door exclusion from `FindClosestAvailableByProximity`**
+  (added round 15) - user confirmed the door toggling was just them
+  testing repeatedly, not a real bug. Excluding Door had a real side
+  effect: it caused the door's spoken name to fall back to whatever
+  OTHER nearby Placeable was picked instead (user reported the
+  entrance door saying "mesa de bebidas" and the cellar door saying
+  "barril").
+  - net effect: 2 of the 4 fixes from round 15/16 cancel out (added
+    then removed the Door exclusion) - worth remembering as "Door
+    must stay a candidate in that scan" if this comes up again.
+- **Ambient bark filter was too broad**: confirmed via log the
+  player's OWN bark lines ("O barril está vazio.") share the same
+  "Bark UI" UI prefab as ambient NPC chatter, distinguished only by
+  path root ("Player/..." vs an NPC name). Fixed with
+  `IsAmbientNpcBark()` - only filters non-Player Bark UI paths now.
+- Noted but not actioned: user unsure which listed Placeable items
+  are meaningfully interactive - no filtering criteria defined yet,
+  flagged as a possible next step if it proves too noisy.
+- Footstep silence: still not diagnosed (diagnostic logging from
+  round 15 not yet confirmed by a test).
+
+Build clean. See `docs/modules/world-object-navigation.md` 7th round
+entry.
+
+## Stopping point - 2026-06-20, round 15
+
+Still `feature/worldNavigation`, not yet committed. User confirmed the
+crash fix + Stage 3 worked well, then reported 2 NEW bugs (found via
+log, not guessed) plus 3 more feature asks.
+
+- **Ctrl+Enter was toggling doors open/closed on its own** - `Door`
+  also implements `IInteractable`/`IProximity` like the fireplace, so
+  last round's fallback caught it too; `Door.MouseUp` just flips
+  open/closed. Excluded `Door` from that fallback - doors already
+  work fine via their native key.
+- **New crash found**: `PlayerController.GetPlayerPosition` NREs
+  during brief same-scene transitions where `GetPlayer(1)` is
+  temporarily null (not covered by `Main.CheckGameReady()`). Added a
+  guard at the top of `WorldNavigationHandler.Update()`.
+- **Footstep sound still not playing** - confirmed via log that
+  `Footsteps.instance` was never non-null when checked, all session
+  (zero success log lines). Root cause not yet found - added
+  diagnostic logging instead of guessing a 3rd fix blind.
+- **Shipped**: sound on action-prompt arrival (`UISound.PlayNavigate`),
+  ambient "Conversa ao redor" announcements disabled (user found it
+  too noisy around Arthur's family), `Placeable` items added to the
+  Page Up/Down list (same 30-unit proximity rule as doors, names
+  reused from the game's own GameObject naming - not yet confirmed
+  if this makes the list too long/noisy).
+- Noted: tutorial gating blocks leaving the tavern right now - that's
+  the game itself, not a bug, just means zone-change testing is
+  blocked until that part of the tutorial is cleared.
+- Wall-bump sound: still not started (now 2nd round deferred).
+
+Build clean. See `docs/modules/world-object-navigation.md` 6th round
+entry for full detail and the next test list.
+
+## Stopping point - 2026-06-20, round 14
+
+Still `feature/worldNavigation`, not yet committed. User reported a
+silent regression (item announcements stopped completely) plus 4 new
+asks. Found and fixed a real crash, implemented Stage 3, deferred 1
+item explicitly.
+
+- **Critical bug fixed**: `Harvestable.IsAvailableByProximity` threw
+  a `NullReferenceException` every frame inside
+  `GetNearestInteractionName()` (added last round), silently killing
+  `DialogueAnnouncer.ScanAndAnnounceText()` entirely - confirmed via
+  2305 repeated exceptions in the log, all with the same stack trace.
+  Fixed with try/catch around the proximity check.
+- **Area announcement**: never fired in the user's test. Added
+  unconditional debug logging of the raw `Location` value on every
+  change (not just non-None) to confirm next round whether it's a
+  real bug or the player just never crossed a zone-transition trigger.
+- **Footsteps re-done**: time-based cooldown reduction wasn't good
+  enough per user feedback (wants exactly 1 sound per tile while
+  walking). Disabled the native timer (huge cooldown via reflection)
+  and added our own distance-based trigger (0.5 units = 1 tile,
+  confirmed in `WorldGrid.allNeighbours`), replicating the game's own
+  terrain-to-clip logic in simplified form. Required referencing
+  `Assembly-CSharp-firstpass.dll` (where `AudioObject`/
+  `MultiAudioManager` live) in the `.csproj`.
+- **Stage 3 shipped**: Home key toggles continuous direction+distance
+  guidance to the Page Up/Down-selected target, updating every tile
+  walked ("10 pra cima, 8 pra esquerda" style, world-space deltas).
+- **Deferred to next round**: wall-bump sound (detect blocked
+  movement) - new ask, not started, too much already in this round to
+  add safely.
+
+Build clean (had to add the new assembly reference). Not yet tested
+live - next round needs the crash fix confirmed first (it's the
+highest-impact one), then Stage 3 and footsteps. See
+`docs/modules/world-object-navigation.md` 5th round entry.
+
+## Stopping point - 2026-06-20, round 13
+
+Still `feature/worldNavigation`, not yet committed. User reported the
+new Stage 2 list felt too restrictive and raised 3 new orientation
+asks together. Triaged: implemented the well-understood ones, clearly
+deferred the bigger one rather than guess.
+
+- **Doors should appear by proximity, not just after being opened**:
+  `BuildTargetList()` now also includes any `Door` within 30 units of
+  the player (the remembered "entrance" door is still tracked
+  separately, since that's the only one that needs disambiguating
+  from others by NAME, not just presence).
+- **Items + characters + categories**: NOT implemented this round -
+  confirmed `Placeable` (items) and `DialogueNPCBase`/`NPC`
+  (characters) exist as the likely enumerable types, but giving them
+  proper categories needs its own investigation pass (next round).
+- **Area name on zone change**: implemented - polls
+  `PlayerController.LEOIMFNKFGA` (a `Location` enum), announces
+  "Área: <nome>" via a hardcoded PT-BR translation table
+  (`LocationNames`) on change.
+- **Footstep cadence**: confirmed via decompiled `Footsteps.cs` this
+  is the game's OWN system (not ours), time-based (0.5s cooldown
+  while moving) rather than tile-based. Real tile size confirmed in
+  `WorldGrid.allNeighbours` = 0.5 units. Reduced the cooldown via
+  reflection to 0.2s (no public setter) instead of adding a second,
+  competing sound source. Empirical adjustment - flagged to the user
+  as something to re-tune after testing, not a guaranteed-exact fix.
+
+Build clean. Not yet tested live. See `docs/modules/world-object-navigation.md`
+(4th round entry) for full detail.
+
+## Stopping point - 2026-06-20, round 12
+
+Feature branch `feature/worldNavigation` (off `main`), not yet
+committed. Big round - moved from Stage 1 (feasibility) into Stage 2
+(first real player-facing control) plus 2 unrelated bugs found via
+live log during testing:
+
+- **Stage 1 confirmed both targets**: door via `GetCurrentInteractGO()`
+  (captured live, dist~0), bed via `Bed.GetPlayerBedPosition()`
+  (static call, no proximity needed).
+- **Bed's "Dormir?" popup was never announced** - found via decompiled
+  `Bed.OnTriggerEnter2D`: it's a pure proximity trigger opening a
+  `YesNoDialogueUI`, whose question text was never read. Fixed in
+  `KeyboardUINavigator.AnnounceYesNoQuestionIfChanged` - confirmed
+  working by user.
+- **Fireplace-type objects never worked with Q nor with the
+  Ctrl+Enter fallback** - root-caused via decompiled `Fireplace.cs`:
+  it implements `IInteractable`/`IProximity`, bypassing
+  `InteractObject.GetCurrentInteractGO()` entirely (confirmed null in
+  log every time). Fixed: Ctrl+Enter now also tries calling
+  `IInteractable.MouseUp` directly on the closest
+  `IProximity.IsAvailableByProximity` object. "Combustível" (add fuel)
+  still unresolved - looks like inventory drag-and-drop, different
+  problem, deferred.
+- **Action-prompt announcement (added last round) was ping-ponging
+  forever** - root cause in log: 2 simultaneous prompts (fireplace's
+  "Abrir" + "Combustível") thrashed a single-value tracker. Fixed with
+  a `HashSet` of currently-visible prompts (announce only new ones).
+  Also added the object's name to the announcement per user request
+  (`WorldNavigationHandler.GetNearestInteractionName()`).
+- **Stage 2 shipped**: Page Up/Down cycles between the 2 known targets
+  and speaks the name. Door has no stable static reference (its
+  GameObject name is reused by every door in the game) - solved by
+  remembering whichever Door the player actually opens via
+  `GetCurrentInteractGO()`, once per session.
+
+Build clean. Not yet tested live - next round needs to confirm Stage 2
+cycling, the fireplace Ctrl+Enter fix, and the dedup fix, all together.
+See `docs/modules/world-object-navigation.md` (3rd round entry) and
+`docs/modules/core-gameplay-navigation.md` for details.
+
+## Stopping point - 2026-06-20, round 11
 
 Found the real root cause of the recurring "Space produces no sound
 advancing dialogue" report (rounds 10/11 fixes didn't actually fix
@@ -433,6 +1443,10 @@ much deeper reverse-engineering. Not being worked on unless asked.
   In progress.
 - `docs/modules/core-gameplay-navigation.md` - World navigation
   research: zones, interactables, map. Research only, not implemented.
+- `docs/modules/world-object-navigation.md` - Navigate to
+  doors/objects/characters (Page Up/Down list, Home for direction, End
+  to auto-walk). Active feature, branch `feature/worldNavigation`,
+  Stage 1 (coordinate feasibility) in progress.
 - (Add one file per feature/module here as new ones start, e.g.
   `docs/modules/tutorial.md`.)
 
