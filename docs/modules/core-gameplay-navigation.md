@@ -76,6 +76,17 @@ ainda, por ser uma rodada cheia de outros consertos).
      por um `HashSet` com as frases atualmente visíveis (anuncia só as
      novas). Também adicionado o nome do objeto ao anúncio (ex:
      "Porta: Abrir") via `WorldNavigationHandler.GetNearestInteractionName()`.
+   - **Corrigido (2026-06-21):** durante a feature de inventário, o
+     usuário tentou usar o esfregão pra limpar a mesa e testou várias
+     teclas no escuro (Q, F, E, Ctrl+Enter, clique do mouse) sem
+     conseguir confirmar qual funcionava. Achado: a tecla certa estava
+     na própria dica visual do jogo (`"[E] Limpar"`) o tempo todo - só
+     que `DialogueAnnouncer` REMOVIA essa parte (`ActionPromptPattern`)
+     antes de anunciar. Adicionado `ActionPromptKeyPattern` (captura a
+     letra) e o anúncio agora inclui "(tecla X)" no final - ex:
+     "Próximo: Mesa grande: Limpar (tecla E)". Resolve de raiz qualquer
+     ação cujo atalho não seja já conhecido pelo usuário, não só
+     "Limpar".
 3. **Mapa**: existem várias telas de mapa - `CityMapUI` (mapa da
    cidade), `MiniMapUI` (minimapa), `TreasureMapUI` (mapa de tesouro).
    Todas são visuais (posições espaciais numa imagem) - tornar isso

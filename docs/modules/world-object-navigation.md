@@ -1373,6 +1373,208 @@ raio e volumes ajustados:**
 4. Raio de 3 telhas parece bom agora?
 5. "testei" quando terminar.
 
+**34ª rodada (2026-06-21) - manchas: anúncio próprio + rota melhor + numeração quando há várias:**
+
+Veio da feature de inventário (limpeza com esfregão): usuário
+reportou "continua sem anunciar manchas", "rotas para as manchas são
+muito imprecisas", "está muito inconsistente achar as manchas",
+"preciso do anúncio dela... mesmo que não tenha anúncio oficial do
+jogo, limpar igual a mesa, coloque você".
+
+- **Anúncio próprio adicionado** (`HandleFloorDirtAnnouncement`, novo
+  método): `FloorDirt` raramente/nunca mostra a dica visual "[E] ..."
+  do próprio jogo de forma confiável (diferente da mesa, que mostra
+  sempre) - então o `DialogueAnnouncer` (que só lê texto de tela)
+  não tinha nada pra anunciar na maioria das vezes. Agora, sempre que
+  `InputByProximityManager.GetCurrentFocusedInputElement()` foca numa
+  `FloorDirt` (mesmo sistema de proximidade que o jogo já usa
+  internamente, confirmado via `CleaningDebugPatch` no round
+  anterior), fala "Próximo: Mancha no chão: segure E pra limpar"
+  diretamente - não depende do jogo mostrar nada na tela.
+- **Rota até a mancha corrigida**: `BuildTargetList()` registrava a
+  posição EXATA do centro da `FloorDirt` sem ajuste - mesmo problema
+  já corrigido antes pra Placeables (`GetApproachPosition`, ver nota
+  do barril preso na parede) podia estar causando rota imprecisa
+  pra cima de manchas também. Agora usa `GetApproachPosition` igual
+  os outros alvos.
+- **Numeração quando há mais de uma mancha por perto**: antes, 2+
+  manchas apareciam todas como "Mancha no chão" idêntico na lista de
+  Page Up/Down (categoria "Missão") - impossível saber qual era qual.
+  Agora, com mais de uma por perto, ficam "Mancha no chão 1", "Mancha
+  no chão 2"... ordenadas por distância (1 = mais próxima).
+
+Build limpo. Não consertei "rotas imprecisas" com certeza absoluta -
+é uma correção análoga a um bug já confirmado pra outros alvos, mas
+ainda não testada ao vivo especificamente pra manchas.
+
+**35ª rodada (2026-06-22) - numeração instável corrigida + pontos exatos de banco junto da mesa:**
+
+Usuário relatou (sem F12 ativado no teste, então sem log pra
+confirmar - baseado direto no relato): "os bancos estão numerados
+errados" e "os pontos perto da mesa pra colocar os bancos não
+aparecem na lista nem são anunciados".
+
+- **Numeração instável - causa achada por revisão de código**: tanto
+  manchas quanto bancos eram numerados (`OrderBy` por distância ATÉ O
+  JOGADOR) - como essa lista é reconstruída do zero a cada vez que
+  Page Up/Down é usado, e a distância até o jogador muda a cada passo
+  que ele dá, "Banco 1" podia apontar pra um banco diferente cada vez
+  que a lista era refeita, mesmo sem nada mudar no mundo. Corrigido:
+  agora ordena por posição FIXA no mundo (x depois y), não por
+  distância até o jogador - o mesmo banco sempre fica com o mesmo
+  número.
+- **Pontos exatos pra colocar o banco**: confirmado lendo `Table.cs`
+  que existe uma resposta precisa pra "onde a mesa quer um banco" -
+  um campo privado `seatingGroups` (cada um com sua própria posição
+  no mundo e um `occupied` que o jogo já controla). Lido via reflexão
+  (`AccessTools.Field`, só leitura, não muda nada do jogo). Agora
+  aparecem na lista "Missão" como "Lugar pra banco (mesa)" - só os
+  vazios (ocupados não aparecem) - e também são anunciados por
+  proximidade ("Próximo: Lugar pra banco junto da mesa"), igual já
+  acontecia com manchas/bancos.
+
+Build limpo. Nada disso foi confirmado ao vivo ainda - pedido reteste
+com F12 ativado desta vez, pra eu poder confirmar pelo log.
+
+**Próximo teste (com F12 ativado antes de entrar no jogo):**
+1. Andar perto de uma mancha no chão - ouve "Próximo: Mancha no chão:
+   segure E pra limpar" agora, mesmo sem ver nada na tela?
+2. Com 2+ manchas por perto, Page Up/Down (categoria Missão) fala
+   "Mancha no chão 1", "2" etc., não mais tudo igual?
+3. Ativar o guia (Home) até uma mancha - a rota chega certo, sem
+   ficar perdida/imprecisa?
+4. Pegue um banco (modo de decoração) e veja se "Banco 1"/"Banco 2"
+   continua se referindo ao MESMO banco depois de andar e checar de
+   novo no Page Up/Down.
+5. Perto de uma mesa, escuta "Próximo: Lugar pra banco junto da
+   mesa"? Aparece "Lugar pra banco" na lista de Missão?
+6. "testei" quando terminar.
+
+## Mudanças de categoria (rodada 102)
+
+- `CategoryOrder` agora: Portas, **Pendentes** (era "Missão"),
+  **Repositivos** (nova), Containers, Máquinas, Coletáveis, Decorativos.
+- **Pendentes**: coisas que ainda precisam de ação - manchas, lugares
+  livres pra banco, bancos AINDA SEM mesa, mesa suja, e vela totalmente
+  gasta. Bancos com `Seat.table != null` (já associados) saem da lista.
+- **Repositivos**: consumíveis colocados e funcionando - vela acesa (id
+  605). Vela gasta (Crafter `LCCABPFHCOL <= 1`) migra pra Pendentes.
+- Proximidade de vela: `HandleCandleAnnouncement` (cache `_cachedCandles`,
+  20s) fala "Vela acesa"/"Vela apagada, precisa repor". A % exata está
+  pendente (combustível máximo não lido de forma confiável ainda) - o log
+  "candle proximity ... fuel=N" captura o valor real pra calcular depois.
+
+## Anúncio de obstáculo ao travar (rodada 105)
+
+Quando o jogador fica preso contra algo enquanto anda (sustained bump,
+`HandleWallBump`), além do som de item/parede, agora FALA o que está
+bloqueando + direção: "Bloqueado por {nome}, à direita/esquerda/cima/
+baixo". `IsBlockedByNonWallItem(pos, dir, out blockerName)` devolve o nome
+de QUALQUER collider real atingido (móvel "(Clone)" OU cenário estático,
+ex. a pilha de tijolos "Grupo Ladrillos" que prendeu o jogador na porta -
+paredes não têm Collider2D aqui, então o que for atingido é nomeável).
+`DescribeBlockerCollider` usa o nome localizado do item (se for Placeable)
+ou limpa o nome do GameObject ("(Clone)" e id "1234 - "). Anunciado uma
+vez por bloqueador (reanuncia só ao mudar). A classificação de SOM
+item/parede continua pelo sinal "(Clone)".
+
+Caso achado no log da rodada 105: porta da taverna aberta em (12, 909.48),
+mas o jogador preso por "Grupo Ladrillos" (objeto de tutorial/construção)
+em (12.5, 908.5) à direita; esquerda/cima/baixo livres.
+
+## Tecla C - coordenadas (rodada 106)
+
+`HandleCoordinateKey`: apertar **C** fala "Você está em X, Y" (arredondado
+a telhas inteiras). Se há um alvo selecionado (`_selectedTarget`, via Page
+Up/Down), fala também "Alvo NOME em X, Y". Bloqueado se Ctrl/Shift
+estiverem pressionados. `KeyCode.C` confirmado não usado no decompilado.
+Ajuda o jogador a se localizar e a ALINHAR com passagens estreitas (ex.:
+porta a x=12 enquanto ele está a x=12.39).
+
+## Porta - bloqueio é alinhamento + obstáculo, não missão (rodada 106)
+
+Diagnóstico do log: a porta da taverna fica aberta, mas a passagem é em
+x=12 e o jogador costuma parar levemente ao lado (x=12.39), com a pilha de
+tijolos "Grupo Ladrillos" do outro lado. Não é trava de missão. A rota pra
+porta ainda cai em `door.transform.position` porque `freeNodesOnOpen` está
+vazio (imprecisão conhecida, não corrigida ainda) - a tecla C compensa
+deixando o jogador alinhar manualmente.
+
+## Rodada 107 - passagens, ratos, cama, aviso mais rápido
+
+- **TravelZones em "Portas"**: saídas entre áreas (ex. adega->taverna) são
+  `TravelZone`, não `Door` (log: "TravelZone-CellarToTavern"). `BuildTargetList`
+  lista `TravelZone` próximas em "Portas" via `DescribeTravelZone` (nome por
+  `locationTo`, mapa `LocationName`). Por isso a saída da adega não aparecia.
+- **Ratos em "Pendentes"**: `TutorialRat` (objetivo "Remova os ratos da
+  adega") listados como "Rato N" (ordem x/y estável).
+- **Cama só perto**: antes adicionada sempre; agora filtrada por
+  `NearbyDoorRadius` (30u). A adega compartilha a Location da taverna
+  (filtro de Location não separa), mas fica ~105u da cama, então some lá.
+- **Aviso de bloqueio mais rápido**: a VOZ "Bloqueado por ..." dispara em
+  `BlockerAnnounceSeconds` (0.2s); o SOM de bump mantém `WallStuckSeconds`
+  (0.6s). Ver `HandleWallBump`.
+
+## Rodada 108 - Tab objetivo, nome ao posicionar, ratos (movem/proximidade)
+
+- **Tecla TAB** (`HandleObjectiveKey`, só fora de menu): lê os objetivos
+  ativos ao vivo de `NewTutorialManager.instance.objectives[i].textMesh`
+  (só os com gameObject ativo), então a contagem ("2 ratos") vem
+  atualizada. `KeyCode.Tab` não usado pelo jogo.
+- **Nome ao posicionar** (DecorationModeHandler.HandlePlacementResult):
+  "{nome} encaixado na mesa"/"{nome} colocado"; removida a frase "mas não
+  num ponto de mesa" (confusa com o force-snap da rodada 106).
+- **Ratos se MOVEM**: `TutorialRat` tem corrotinas de wander - por isso a
+  rota (que fixa a posição na seleção) fica velha. Live-tracking adiado.
+- **Proximidade de rato** (`HandleRatAnnouncement`, cache `_cachedRats`):
+  "Rato perto. Use o esfregão pra removê-lo" quando o rato mais próximo
+  muda. Interação é o esfregão (diálogo da missão); `TutorialRat` não é
+  IInteractable, não há tecla discreta - gesto exato do esfregão não
+  investigado ainda.
+
+## Rodada 111 - sons instantâneos/baixo lag + ratos (morte/direção)
+
+- **Som de bater mais rápido + menos lag**: `WallStuckSeconds` 0.25->0.08
+  (dispara quase no toque). `HandleWallBump` classifica (parede vs item +
+  nome) UMA vez na transição (campos `_bumpClassified`/`_bumpIsItem`/...),
+  não raycast por frame. `HandleDirectionalWallSound` usa `RaycastNonAlloc`
+  (`_raycastBuffer`) em vez de `RaycastAll` (4x/frame).
+- **Rato morre**: `HandleRatAnnouncement` conta refs não-nulos em
+  `_cachedRats` (rato morto vira null) -> "Rato removido, faltam N".
+- **Direção do rato**: anuncia pra que lado o rato MAIS PRÓXIMO foi
+  (throttle 0.6s, ~1 telha de movimento).
+- Sons persistentes (volume-toggle, rodada 109) já garantem início/fim
+  instantâneo no áudio em si.
+
+## Rodada 112 - LAG (grande), áreas (cômodos), categorias
+
+- **Lag** (log: RefreshSeatSceneCache 348ms, GetEmptySeatSlots 15ms/1.5s):
+  ratos via lista viva `SceneReferences.tutorialRats` (sem FindObjectsOfType,
+  morte exata); candle scan (FindObjectsOfType<Placeable>, o mais caro) movido
+  pra cadência própria de 60s; seats/tables 30s; `GetEmptySeatSlots` com
+  early-out se nenhuma mesa por perto; BuildTargetList usa cache em vez de
+  FindObjectsOfType.
+- **Áreas (cômodos)**: `HandleZoneTypeAnnouncement` lê o `ZoneType`
+  (`WorldGrid.AGKGGAFFFGM`) e avisa ao mudar: Cozinha (CraftingRoom), Sala de
+  jantar (DiningRoom), Adega (Cellar), Quarto (RentedRoom/RoomPlayerN),
+  Corredor (WithoutZone), oficinas.
+- **Categorias**: `DrinksTable` e `NinjaPreparationTable` -> "Máquinas".
+
+## Rodada 113 - lag (item proximity), cama, guia, bebidas
+
+- **Lag grande**: `HandleItemProximitySounds` fazia `FindObjectsOfType<
+  Placeable>()` A CADA SEGUNDO. Agora há `_cachedAllPlaceables` (15s)
+  compartilhado por item-proximity e o filtro de velas. Provável causa
+  também dos avisos de área parecerem "só no load".
+- **Tecla C**: desativar o guia (Home) limpa `_selectedTarget`.
+- **Cama**: rota vai pro `Bed.instance.sleepCollider.bounds.center` (gatilho
+  de dormir, caminhável) em vez de `GetPlayerBedPosition()`.
+- **Bebidas** (`IsDrinkStation`): DrinkDispenser/DrinksTable -> "Dispensador
+  de bebidas"; ServiceBarrel/BanquetBarrel -> "Barril"; todos em "Máquinas"
+  (checado antes do Container, pois DrinkDispenser É Container).
+- Pendente: "mesa de menu" (identificar), inventário da direita mudo no
+  dispensador (precisa do log da tela), precisão geral de rotas.
+
 ## Arquivos envolvidos
 
 - `CustomSounds.cs` - carrega e toca os `.wav` próprios do usuário.

@@ -26,6 +26,7 @@ namespace TravellersRestAccess
         private static AudioClip _wallLeftClip;
         private static AudioClip _wallRightClip;
         private static AudioClip _itemBumpClip;
+        private static AudioClip _cleanedClip;
         private static bool _loadStarted;
 
         // User's explicit request: a distinct sound per item type, named after the item
@@ -69,6 +70,14 @@ namespace TravellersRestAccess
                 yield return LoadClip(Path.Combine(baseDir, itemName + ".wav"), clip => _itemClips[itemName] = clip);
             }
             yield return LoadClip(Path.Combine(baseDir, "batendo em item.wav"), clip => _itemBumpClip = clip);
+
+            // User's explicit request: a sound for "something got cleaned/completed" - the
+            // game's own version of this (NewTutorialManager.PlayObjectivesCompletedSound)
+            // goes through MultiAudioManager, already confirmed unreliable/silent for us. One
+            // shared clip for both a floor stain being cleaned (FloorDirt.DestroyFloorDirt)
+            // and a tutorial objective being checked off (NewTutorialManager.ObjectiveCompleted)
+            // - user said a short clip (~2s) is fine even if it's not a perfect match for both.
+            yield return LoadClip(Path.Combine(baseDir, "limpou.wav"), clip => _cleanedClip = clip);
         }
 
         private static IEnumerator LoadClip(string path, System.Action<AudioClip> onLoaded)
@@ -180,6 +189,11 @@ namespace TravellersRestAccess
         // right, left turn pans left, up/down play centered.
         public static void PlayDirectionChange(float pan) => PlayOneShot(_standClip, pan);
 
+        // User's explicit request: this one at 100% regardless of the shared 60% base
+        // (Volume) everything else uses - volumeMultiplier is applied ON TOP of Volume in
+        // PlayOneShot, so 1/Volume cancels it out to reach true 100%.
+        public static void PlayObjectiveCompleted() => PlayOneShot(_cleanedClip, volumeMultiplier: 1f / Volume);
+
         private static void PlayOneShot(AudioClip clip, float pan = 0f, float pitch = 1f, float volumeMultiplier = 1f)
         {
             if (clip == null) return;
@@ -198,26 +212,34 @@ namespace TravellersRestAccess
         // User's explicit request: instead of one-shot retriggers every cooldown, keep the
         // wall sound looping continuously for as long as the player stays stuck, and stop
         // the instant they're not stuck anymore.
+        // Round 109: persistent + volume-toggle, same instant-response fix as the directional
+        // sounds - the old create/Destroy-on-each-start/stop added audible latency.
         private static AudioSource _wallLoopSource;
+
+        private static AudioSource EnsureLoopSource(ref AudioSource field, AudioClip clip, string name)
+        {
+            if (field == null && clip != null)
+            {
+                var go = new GameObject(name);
+                field = go.AddComponent<AudioSource>();
+                field.clip = clip;
+                field.spatialBlend = 0f;
+                field.loop = true;
+                field.volume = 0f;
+                field.Play();
+            }
+            return field;
+        }
 
         public static void StartWallBumpLoop()
         {
-            if (_wallLoopSource != null || _wallClip == null) return;
-
-            var go = new GameObject("TravellersRestAccess_WallLoopAudio");
-            _wallLoopSource = go.AddComponent<AudioSource>();
-            _wallLoopSource.clip = _wallClip;
-            _wallLoopSource.spatialBlend = 0f;
-            _wallLoopSource.volume = Volume;
-            _wallLoopSource.loop = true;
-            _wallLoopSource.Play();
+            var s = EnsureLoopSource(ref _wallLoopSource, _wallClip, "TravellersRestAccess_WallLoopAudio");
+            if (s != null && s.volume != Volume) s.volume = Volume;
         }
 
         public static void StopWallBumpLoop()
         {
-            if (_wallLoopSource == null) return;
-            Object.Destroy(_wallLoopSource.gameObject);
-            _wallLoopSource = null;
+            if (_wallLoopSource != null && _wallLoopSource.volume != 0f) _wallLoopSource.volume = 0f;
         }
 
         // Same sustained-stuck pattern as the wall loop above, but for getting stuck
@@ -226,22 +248,13 @@ namespace TravellersRestAccess
 
         public static void StartItemBumpLoop()
         {
-            if (_itemBumpLoopSource != null || _itemBumpClip == null) return;
-
-            var go = new GameObject("TravellersRestAccess_ItemBumpLoopAudio");
-            _itemBumpLoopSource = go.AddComponent<AudioSource>();
-            _itemBumpLoopSource.clip = _itemBumpClip;
-            _itemBumpLoopSource.spatialBlend = 0f;
-            _itemBumpLoopSource.volume = Volume;
-            _itemBumpLoopSource.loop = true;
-            _itemBumpLoopSource.Play();
+            var s = EnsureLoopSource(ref _itemBumpLoopSource, _itemBumpClip, "TravellersRestAccess_ItemBumpLoopAudio");
+            if (s != null && s.volume != Volume) s.volume = Volume;
         }
 
         public static void StopItemBumpLoop()
         {
-            if (_itemBumpLoopSource == null) return;
-            Object.Destroy(_itemBumpLoopSource.gameObject);
-            _itemBumpLoopSource = null;
+            if (_itemBumpLoopSource != null && _itemBumpLoopSource.volume != 0f) _itemBumpLoopSource.volume = 0f;
         }
 
         // User's explicit request: a continuous, directional sense of nearby walls (not
@@ -251,47 +264,50 @@ namespace TravellersRestAccess
         private static readonly System.Collections.Generic.Dictionary<string, AudioSource> _directionalWallSources =
             new System.Collections.Generic.Dictionary<string, AudioSource>();
 
+        // Round 109: user reported the directional wall sound had audible delay to START and to
+        // STOP. Root cause: the old version CREATED a GameObject+AudioSource and called Play() the
+        // moment a wall appeared, and DESTROYED it when it vanished - AudioSource.Play() on a fresh
+        // source has start-up latency, and the churn itself adds delay. Now each direction's source
+        // is created ONCE (lazily) and kept playing its loop continuously at volume 0; activating
+        // just sets the volume. Toggling volume is instant (no latency, no GC/GameObject churn), so
+        // the sound appears/disappears immediately. Idle cost is 4 silent looping sources - trivial.
         public static void SetDirectionalWallSound(string direction, bool active)
         {
-            bool playing = _directionalWallSources.TryGetValue(direction, out var existing) && existing != null;
-            if (active == playing) return;
-
-            if (!active)
+            if (!_directionalWallSources.TryGetValue(direction, out var source) || source == null)
             {
-                Object.Destroy(existing.gameObject);
-                _directionalWallSources.Remove(direction);
-                return;
+                AudioClip clip = direction switch
+                {
+                    "baixo" => _wallDownClip,
+                    "cima" => _wallUpClip,
+                    "esquerda" => _wallLeftClip,
+                    "direita" => _wallRightClip,
+                    _ => null,
+                };
+                if (clip == null) return;
+
+                float pan = direction == "esquerda" ? -1f : direction == "direita" ? 1f : 0f;
+                var go = new GameObject($"TravellersRestAccess_DirectionalWall_{direction}");
+                source = go.AddComponent<AudioSource>();
+                source.clip = clip;
+                source.spatialBlend = 0f;
+                source.panStereo = pan;
+                source.loop = true;
+                source.volume = 0f;
+                source.Play();
+                _directionalWallSources[direction] = source;
             }
 
-            AudioClip clip = direction switch
-            {
-                "baixo" => _wallDownClip,
-                "cima" => _wallUpClip,
-                "esquerda" => _wallLeftClip,
-                "direita" => _wallRightClip,
-                _ => null,
-            };
-            if (clip == null) return;
-
-            float pan = direction == "esquerda" ? -1f : direction == "direita" ? 1f : 0f;
-            var go = new GameObject($"TravellersRestAccess_DirectionalWall_{direction}");
-            var source = go.AddComponent<AudioSource>();
-            source.clip = clip;
-            source.spatialBlend = 0f;
-            source.volume = Volume;
-            source.panStereo = pan;
-            source.loop = true;
-            source.Play();
-            _directionalWallSources[direction] = source;
+            float target = active ? Volume : 0f;
+            if (source.volume != target) source.volume = target;
         }
 
         public static void StopAllDirectionalWallSounds()
         {
+            // Just mute the persistent sources (don't destroy - they're reused, see above).
             foreach (var source in _directionalWallSources.Values)
             {
-                if (source != null) Object.Destroy(source.gameObject);
+                if (source != null) source.volume = 0f;
             }
-            _directionalWallSources.Clear();
         }
     }
 }

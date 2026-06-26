@@ -41,6 +41,11 @@ namespace TravellersRestAccess
         private static readonly Regex ClockPattern = new Regex(@"^\d{1,2}:\d{2}$");
         private static readonly Regex DayCounterPattern = new Regex(@"^[A-Za-zÀ-ÿ]{3}\.\s*\d+$");
         private static readonly Regex ActionPromptPattern = new Regex(@"^\[\w\]");
+        // User couldn't tell which key actually performs an action (tried Q, F, E, mouse
+        // click guessing at "Limpar") - the key was right there in the game's own on-screen
+        // hint the whole time ("[E] Limpar"), just stripped out before announcing. Capturing
+        // it instead of discarding it.
+        private static readonly Regex ActionPromptKeyPattern = new Regex(@"^\[(\w)\]");
 
         // Confirmed live: starting a New Game (still inside the title screen scene, no
         // actual Unity scene change) caused a burst of unrelated HUD labels to all
@@ -234,6 +239,7 @@ namespace TravellersRestAccess
                     if (!_activeActionPrompts.Contains(clean))
                     {
                         string stripped = ActionPromptPattern.Replace(clean, "").Trim();
+                        string key = ActionPromptKeyPattern.Match(clean) is { Success: true } keyMatch ? keyMatch.Groups[1].Value.ToUpperInvariant() : null;
                         // Best-effort - user asked for the object's name, not just the verb
                         // ("Abrir" alone doesn't say if it's a door, chest, etc.). Approximate
                         // when 2 different objects each show their own prompt at once - see
@@ -241,6 +247,7 @@ namespace TravellersRestAccess
                         var audioInfo = WorldNavigationHandler.GetNearestInteractionAudioInfo();
                         string targetName = audioInfo?.name;
                         string promptText = string.IsNullOrEmpty(targetName) ? stripped : $"{targetName}: {stripped}";
+                        if (!string.IsNullOrEmpty(key)) promptText += $" (tecla {key})";
                         CustomSounds.PlayItemNearby(audioInfo?.name, audioInfo?.pitch ?? 1f, audioInfo?.pan ?? 0f);
                         ScreenReader.Say($"Próximo: {promptText}", interrupt: false);
                         DebugLogger.LogState($"Action prompt announced: \"{promptText}\"");

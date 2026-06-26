@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using HarmonyLib;
 using MelonLoader;
 using UnityEngine;
 using UnityEngine.EventSystems;
@@ -24,6 +25,8 @@ namespace TravellersRestAccess
         private const float LogInterval = 1f;
         private float _lastLogTime;
         private GameObject _lastInteractGO;
+        private Door[] _cachedDoors;
+        private float _lastDoorCacheTime = -999f;
 
         // Stage 2 target list. The entrance door has no reliable static reference (its
         // GameObject name "Door" is reused by every door prefab instance in the game, the
@@ -39,7 +42,15 @@ namespace TravellersRestAccess
         // category, Page Up/Down moves within the current one). Classified by real
         // component types found in decompiled source (Container, Crafter,
         // Placeable.canBeAddedToInventory) rather than guessed from names.
-        private static readonly string[] CategoryOrder = { "Portas", "Missão", "Containers", "Máquinas", "Coletáveis", "Decorativos" };
+        // Round 102: "Missão" renamed to "Pendentes" (things still needing action) per user
+        // request, and a new "Repositivos" category for placed consumables that are working but
+        // will need restocking (candles). Associated benches leave "Pendentes" automatically (see
+        // BuildTargetList - only unassociated benches are listed now).
+        private static readonly string[] CategoryOrder = { "Portas", "Pendentes", "Repositivos", "Containers", "Máquinas", "Coletáveis", "Decorativos" };
+
+        // Candle item id (confirmed in decompiled SurfaceSortOrder/HouseKeeper: ItemDatabaseAccessor
+        // .GetItem(605) is the candle, and the live GameObjects are "605 - Vela(Clone)").
+        public const int CandleItemId = 605;
 
         // User's explicit request: don't start with everything lumped together - default
         // to "Portas" until the player explicitly switches category.
@@ -146,9 +157,21 @@ namespace TravellersRestAccess
         // against something solid. User's explicit request: raised the confirmation delay
         // by ~100ms (0.5s -> 0.6s) for the CONTINUOUS-hold case, and kept the sound LOOPING
         // for as long as they stay stuck (not discrete retriggers on a cooldown).
-        private const float WallStuckSeconds = 0.6f;
+        // Round 111: shortened again 0.25->0.08 - user said the bump sound was still slow. The
+        // sound starts instantly (persistent volume-toggle source) the moment this short threshold
+        // is crossed. Walking ALONG a wall keeps the player displacing (so _wallStuckTime stays 0);
+        // only genuinely-blocked movement accrues it, so ~5 frames still means "stuck", not a brush.
+        private const float WallStuckSeconds = 0.08f;
+        // Round 107: the spoken "Bloqueado por ..." warning fires at a shorter threshold than the
+        // bump SOUND, so the player hears WHAT is in the way almost as soon as they push into it
+        // ("um pouco mais rápido assim q eu virar para um lado bloqueado").
+        private const float BlockerAnnounceSeconds = 0.2f;
         private Vector3? _lastWallCheckPosition;
         private float _wallStuckTime;
+        // Round 105: speak WHAT is blocking the player when stuck on an item (round-105 log: the
+        // player was wedged against "Grupo Ladrillos" - a tutorial brick pile - right at the tavern
+        // door and had no way to know without reading the log). Announced once per blocker.
+        private string _lastBumpBlockerSpoken;
 
         // User's explicit request: a single quick TAP into a wall produced no sound at all
         // (only after ~6 repeated taps, or holding, did it ever play). Root cause: the
@@ -171,6 +194,19 @@ namespace TravellersRestAccess
         // turn, panned to match (left/right) or centered (up/down).
         private Direction? _lastFacingDirection;
 
+        // User's explicit request: floor stains never reliably show the game's own "[E]
+        // ..." on-screen hint (unlike the table, which does via DialogueAnnouncer's text
+        // scan), so this announces it ourselves the moment the game's own proximity system
+        // focuses on one - confirmed via CleaningDebugPatch's log that segurar "Interact"
+        // (E) is the real, working trigger for FloorDirt specifically.
+        private FloorDirt _lastFloorDirtFocus;
+
+        // Unlike FloorDirt/Table, Seat isn't IProximity/registered in
+        // InputByProximityManager (confirmed in decompiled source: plain MonoBehaviour, no
+        // interfaces) - no game-provided "focused" concept to reuse, so this is a plain
+        // distance check instead, same radius already used for item-proximity sounds.
+        private Seat _lastNearSeat;
+
         public void Update(bool anyUiOpen)
         {
             // Confirmed live: PlayerController.GetPlayerPosition(1) (and several methods
@@ -184,7 +220,10 @@ namespace TravellersRestAccess
             {
                 HandleSimulatedClick();
                 HandleTargetCycling();
+                HandleCoordinateKey();
+                HandleObjectiveKey();
                 HandleZoneAnnouncement();
+                HandleZoneTypeAnnouncement();
                 HandleHomeKey();
                 HandleGuidanceUpdate();
                 TrackGuidanceTaps();
@@ -193,6 +232,17 @@ namespace TravellersRestAccess
                 HandleDirectionChangeSound();
                 HandleDirectionalWallSound();
                 HandleItemProximitySounds();
+                HandleFloorDirtAnnouncement();
+                RefreshSeatSceneCache();
+                HandleSeatAnnouncement();
+                HandleSeatSlotAnnouncement();
+                HandleCandleAnnouncement();
+                HandleRatAnnouncement();
+                HandleTavernServiceAnnouncements();
+                HandleServeKeys();
+                HandleCalmKey();
+                HandleExpelKey();
+                HandleMopBackspace();
             }
 
             Vector3 playerPos = PlayerController.GetPlayerPosition(1);
@@ -205,6 +255,18 @@ namespace TravellersRestAccess
             // gets remembered (see _rememberedEntranceDoor above) - needs to run regardless
             // of debug mode now that Stage 2 depends on it, not just diagnostics.
             var interactGO = InteractObject.BBJCJFJEFKK(1)?.GetCurrentInteractGO();
+
+            // Round 71: tried announcing "Nada para interagir aqui" here on E with
+            // interactGO == null (user's repeated report that pressing E near a stale prompt
+            // gives no feedback) - REMOVED after one round of testing. Log proof it was wrong:
+            // zero "CurrentInteract CHANGED" lines in the whole session (this field never once
+            // went non-null), yet the player stood 0.3 units from a door that opened minutes
+            // later and the warning still fired on every E press near it. This field tracks
+            // some interactables (confirmed for beds, a few rounds ago) but not doors - not a
+            // reliable "is there nothing here" signal on its own. Don't reintroduce this without
+            // a confirmed-reliable proximity signal (e.g. cross-checking
+            // InputByProximityManager's focus too, not just this field alone).
+
             if (interactGO != _lastInteractGO)
             {
                 _lastInteractGO = interactGO;
@@ -240,11 +302,76 @@ namespace TravellersRestAccess
 
             DebugLogger.LogState($"WorldNav: Player pos={playerPos}");
 
-            foreach (var door in Object.FindObjectsOfType<Door>())
+            // Round 74: confirmed via the round-73 timers that Object.FindObjectsOfType<Door>()
+            // alone costs ~100-113ms in this scene (same root cause as RefreshSeatSceneCache
+            // above - the call's cost scales with total scene object count, not the 6 doors it
+            // actually returns). This whole block is debug-only diagnostic printing, doors never
+            // change mid-session, so there's no reason to pay that cost every second - cached
+            // with the same long interval as the seat/table cache instead.
+            if (Time.unscaledTime - _lastDoorCacheTime > SeatSceneCacheInterval || _cachedDoors == null)
+            {
+                _lastDoorCacheTime = Time.unscaledTime;
+                var doorScanSw = System.Diagnostics.Stopwatch.StartNew();
+                _cachedDoors = Object.FindObjectsOfType<Door>();
+                if (doorScanSw.ElapsedMilliseconds > 3) DebugLogger.LogState($"WorldNav: PERF Door FindObjectsOfType took {doorScanSw.ElapsedMilliseconds}ms ({_cachedDoors.Length} doors)");
+            }
+            foreach (var door in _cachedDoors)
             {
                 float distance = Vector3.Distance(playerPos, door.transform.position);
                 DebugLogger.LogState($"WorldNav: Door \"{door.gameObject.name}\" pos={door.transform.position} dist={distance:F1}");
             }
+        }
+
+        // Round 106: user's explicit request - press C to hear the player's own coordinate, and,
+        // if a navigation target is currently selected (tracking something), the target's
+        // coordinate too. Coordinates are rounded to whole tiles for readability. The game itself
+        // has no "C" binding among the safe keys, so this doesn't fight any game control.
+        private void HandleCoordinateKey()
+        {
+            if (!Input.GetKeyDown(KeyCode.C)) return;
+            // Don't fire while a modifier is held (Ctrl/Shift+C are common combos elsewhere).
+            if (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)
+                || Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift)) return;
+
+            Vector3 pos = PlayerController.GetPlayerPosition(1);
+            string mine = $"Você está em {Mathf.RoundToInt(pos.x)}, {Mathf.RoundToInt(pos.y)}";
+            if (_selectedTarget.HasValue)
+            {
+                Vector3 t = _selectedTarget.Value.position;
+                ScreenReader.Say($"{mine}. Alvo {_selectedTarget.Value.name} em {Mathf.RoundToInt(t.x)}, {Mathf.RoundToInt(t.y)}", interrupt: true);
+            }
+            else
+            {
+                ScreenReader.Say(mine, interrupt: true);
+            }
+            if (Main.DebugMode) DebugLogger.LogInput("C", $"Coordinate readout pos={pos} target={(_selectedTarget.HasValue ? _selectedTarget.Value.position.ToString() : "none")}");
+        }
+
+        // Round 108: user's explicit request - press Tab to (re)hear the current objective(s),
+        // read LIVE from the tutorial's own objective texts so progress is up to date ("3 ratos",
+        // "2 ratos"...). NewTutorialManager.objectives[i].textMesh is the same source the objective
+        // panel shows; only the active (shown) ones are read. KeyCode.Tab is unused in the
+        // decompiled game code, and this only runs when no UI is open (the gameplay block).
+        private void HandleObjectiveKey()
+        {
+            if (!Input.GetKeyDown(KeyCode.Tab)) return;
+            if (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)
+                || Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift)
+                || Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt)) return;
+
+            var tm = NewTutorialManager.instance;
+            var texts = new List<string>();
+            if (tm != null && tm.objectives != null)
+            {
+                foreach (var obj in tm.objectives)
+                {
+                    if (obj == null || obj.gameObject == null || !obj.gameObject.activeInHierarchy || obj.textMesh == null) continue;
+                    string t = UITextExtractor.GetReadableText(obj.textMesh);
+                    if (!string.IsNullOrEmpty(t)) texts.Add(t.Trim());
+                }
+            }
+            ScreenReader.Say(texts.Count == 0 ? "Nenhum objetivo ativo agora" : $"Objetivo: {string.Join(". ", texts)}", interrupt: true);
+            if (Main.DebugMode) DebugLogger.LogInput("Tab", $"Objective readout: {string.Join(" | ", texts)}");
         }
 
         private void HandleTargetCycling()
@@ -339,6 +466,12 @@ namespace TravellersRestAccess
             }
             else
             {
+                // Round 113: turning the guide off also UNMARKS the target - the user "desativei o
+                // guia" and expected it gone, but the C-key coordinate readout kept announcing the
+                // old target. Clear it so C reports just the position until a new target is picked.
+                _selectedTarget = null;
+                _currentPath = null;
+                _simplifiedSteps = null;
                 ScreenReader.Say("Guia desativado", interrupt: true);
             }
         }
@@ -735,6 +868,7 @@ namespace TravellersRestAccess
             {
                 _wallStuckTime = 0f;
                 _lastWallCheckPosition = null;
+                _lastBumpBlockerSpoken = null;
                 CustomSounds.StopWallBumpLoop();
                 CustomSounds.StopItemBumpLoop();
                 return;
@@ -749,29 +883,59 @@ namespace TravellersRestAccess
             }
             _lastWallCheckPosition = pos;
 
+            // Round 111: not blocked long enough yet - reset everything. (WallStuckSeconds is now a
+            // short 0.08s so the bump SOUND is near-instant.)
             if (_wallStuckTime < WallStuckSeconds)
             {
                 CustomSounds.StopWallBumpLoop();
                 CustomSounds.StopItemBumpLoop();
+                _lastBumpBlockerSpoken = null;
+                _bumpClassified = false;
                 return;
             }
 
-            // User's explicit request: a different sound for getting stuck against
-            // something that isn't a wall (closed door, furniture) - reuses the same
-            // "(Clone)" signal already confirmed for the directional wall sound (static
-            // level geometry isn't runtime-instantiated, furniture/doors are).
-            bool stuckOnItem = IsBlockedByNonWallItem(pos, GetHeldMovementDirection());
-            if (Main.DebugMode) DebugLogger.LogState($"WorldNav: Sustained bump classified as {(stuckOnItem ? "item" : "wall")}");
-            if (stuckOnItem)
+            // Round 111: classify (wall vs item, + blocker name) ONCE per bump event, on the
+            // transition into "stuck", instead of raycasting every frame while held against it -
+            // big lag win (the result doesn't change frame to frame). The sound starts here, the
+            // instant we cross the short threshold.
+            if (!_bumpClassified)
             {
-                CustomSounds.StopWallBumpLoop();
-                CustomSounds.StartItemBumpLoop();
+                _bumpClassified = true;
+                _bumpMoveDir = GetHeldMovementDirection();
+                _bumpIsItem = IsBlockedByNonWallItem(pos, _bumpMoveDir, out _bumpBlockerName);
+                if (_bumpIsItem) { CustomSounds.StopWallBumpLoop(); CustomSounds.StartItemBumpLoop(); }
+                else { CustomSounds.StopItemBumpLoop(); CustomSounds.StartWallBumpLoop(); }
+                if (Main.DebugMode) DebugLogger.LogState($"WorldNav: bump classified as {(_bumpIsItem ? "item" : "wall")}{(_bumpBlockerName != null ? $" ({_bumpBlockerName})" : "")}");
             }
-            else
+
+            // Speak the blocker name + direction once, a bit after the sound (BlockerAnnounceSeconds)
+            // so quick brushes don't talk - uses the name captured on the transition above.
+            if (_wallStuckTime >= BlockerAnnounceSeconds && !string.IsNullOrEmpty(_bumpBlockerName))
             {
-                CustomSounds.StopItemBumpLoop();
-                CustomSounds.StartWallBumpLoop();
+                string dirWord = DirectionWord(_bumpMoveDir);
+                string spoken = string.IsNullOrEmpty(dirWord) ? $"Bloqueado por {_bumpBlockerName}" : $"Bloqueado por {_bumpBlockerName}, {dirWord}";
+                if (spoken != _lastBumpBlockerSpoken)
+                {
+                    _lastBumpBlockerSpoken = spoken;
+                    ScreenReader.Say(spoken, interrupt: false);
+                }
             }
+        }
+
+        private bool _bumpClassified;
+        private bool _bumpIsItem;
+        private string _bumpBlockerName;
+        private Vector2 _bumpMoveDir;
+        // Round 111: reusable buffer for the per-frame directional wall raycasts (RaycastNonAlloc),
+        // to avoid the array allocation RaycastAll did 4x/frame.
+        private static readonly RaycastHit2D[] _raycastBuffer = new RaycastHit2D[16];
+
+        private static string DirectionWord(Vector2 dir)
+        {
+            if (dir == Vector2.zero) return "";
+            if (Mathf.Abs(dir.x) >= Mathf.Abs(dir.y))
+                return dir.x > 0 ? "à direita" : "à esquerda";
+            return dir.y > 0 ? "pra cima" : "pra baixo";
         }
 
         private static Vector2 GetHeldMovementDirection()
@@ -784,8 +948,9 @@ namespace TravellersRestAccess
             return dir;
         }
 
-        private static bool IsBlockedByNonWallItem(Vector2 pos, Vector2 direction)
+        private static bool IsBlockedByNonWallItem(Vector2 pos, Vector2 direction, out string blockerName)
         {
+            blockerName = null;
             if (direction == Vector2.zero) return false;
             float maxDistance = TileSize * 1.2f;
 
@@ -810,9 +975,34 @@ namespace TravellersRestAccess
             // thing being bumped. Whichever is closer wins.
             if (closest.HasValue && (!doorDist.HasValue || closest.Value.distance <= doorDist.Value))
             {
+                // Name ANY real collider blocking the player (round 105) - whether furniture
+                // ("(Clone)") or static scenery like the brick pile "Grupo Ladrillos" that wedged
+                // the player at the door. Walls themselves have no Collider2D here (confirmed long
+                // ago), so anything we hit IS a nameable object worth announcing. The returned bool
+                // still drives only the wall-vs-item SOUND (kept as the "(Clone)" signal).
+                blockerName = DescribeBlockerCollider(closest.Value.collider);
                 return closest.Value.collider.transform.root.name.Contains("(Clone)");
             }
-            return doorDist.HasValue;
+            if (doorDist.HasValue) { blockerName = "porta"; return true; }
+            return false;
+        }
+
+        // Round 105: human-readable name for whatever the player is wedged against, for the spoken
+        // "Bloqueado por ..." announcement. Prefers the localized item name when it's a Placeable;
+        // otherwise cleans the GameObject name (strips "(Clone)" and any leading "1234 - " id).
+        private static string DescribeBlockerCollider(Collider2D collider)
+        {
+            var root = collider.transform.root;
+            var placeable = root.GetComponent<Placeable>() ?? root.GetComponentInChildren<Placeable>();
+            if (placeable != null && placeable.itemSetup != null && placeable.itemSetup.item != null)
+            {
+                string n = placeable.itemSetup.item.IABAKHPEOAF();
+                if (!string.IsNullOrEmpty(n)) return n;
+            }
+            string name = root.name.Replace("(Clone)", "").Trim();
+            int dash = name.IndexOf(" - ");
+            if (dash > 0 && int.TryParse(name.Substring(0, dash).Trim(), out _)) name = name.Substring(dash + 3).Trim();
+            return string.IsNullOrEmpty(name) ? "objeto" : name;
         }
 
         // User's explicit request: a continuous, directional sense of nearby walls (not
@@ -836,7 +1026,11 @@ namespace TravellersRestAccess
         };
 
         private readonly Dictionary<string, float> _wallLastBlockedTime = new Dictionary<string, float>();
-        private const float WallSoundOffDelay = 0.15f;
+        // Round 109: shortened from 0.15 so the directional wall sound disappears almost
+        // immediately when the wall is no longer there (user wanted it instant). Kept just long
+        // enough (~4 frames at 60fps) to bridge a single-frame raycast flicker at the edge of
+        // range, now that the sound itself toggles instantly (persistent volume-toggle source).
+        private const float WallSoundOffDelay = 0.06f;
         private float _lastWallDiagLogTime;
 
         private void HandleDirectionalWallSound()
@@ -855,11 +1049,15 @@ namespace TravellersRestAccess
 
             foreach (var (name, offset) in WallCheckDirections)
             {
-                RaycastHit2D[] hits = Physics2D.RaycastAll(pos, offset, maxDistance);
+                // Round 111: RaycastNonAlloc into a reusable buffer instead of RaycastAll - this
+                // runs 4x EVERY frame, and RaycastAll allocates a fresh array each call (GC churn =
+                // micro-stutter). The buffer is shared/static; 16 hits is plenty for a 1-tile ray.
+                int hitCount = Physics2D.RaycastNonAlloc(pos, offset, _raycastBuffer, maxDistance);
                 RaycastHit2D? closest = null;
-                foreach (var h in hits)
+                for (int hi = 0; hi < hitCount; hi++)
                 {
-                    if (h.collider.isTrigger) continue;
+                    var h = _raycastBuffer[hi];
+                    if (h.collider == null || h.collider.isTrigger) continue;
                     if (playerCollider != null && h.collider.transform.root == playerCollider.transform.root) continue;
                     // User reported "cima" sounding in a corner with no wall there - log
                     // confirmed it was hitting the BED ("1130 - Cama del Jugador(Clone)"),
@@ -980,8 +1178,12 @@ namespace TravellersRestAccess
 
             Vector3 playerPos = PlayerController.GetPlayerPosition(1);
             var nearby = new List<(string name, Vector3 position, float distance)>();
-            foreach (var placeable in Object.FindObjectsOfType<Placeable>())
+            // Round 113: use the shared cached placeable list (refreshed every 15s) instead of a
+            // fresh FindObjectsOfType every second - that per-second full-scene scan was a major
+            // continuous stutter.
+            foreach (var placeable in _cachedAllPlaceables)
             {
+                if (placeable == null) continue;
                 float distance = Vector3.Distance(playerPos, placeable.transform.position);
                 if (distance > ItemSoundRadius) continue;
 
@@ -1058,7 +1260,7 @@ namespace TravellersRestAccess
                     // User's explicit request: a different sound for bumping into a
                     // non-wall obstacle (closed door, furniture) - same "(Clone)" signal as
                     // the directional wall sound and the sustained bump loop.
-                    bool isItem = IsBlockedByNonWallItem(player.transform.position, _pendingTapDirection);
+                    bool isItem = IsBlockedByNonWallItem(player.transform.position, _pendingTapDirection, out _);
                     if (Main.DebugMode) DebugLogger.LogState($"WorldNav: Tap bump classified as {(isItem ? "item" : "wall")}, dir={_pendingTapDirection}");
                     if (isItem)
                         CustomSounds.PlayItemBumpOnce();
@@ -1104,9 +1306,34 @@ namespace TravellersRestAccess
                 list.Add((DescribeDoor(door), GetDoorWalkablePosition(door, playerPos), "Portas"));
             }
 
+            // Round 107: area exits between locations (cellar<->tavern, etc.) are TravelZone
+            // components, NOT Door components - confirmed in the log the cellar exit is
+            // "TravelZone-CellarToTavern" and so never appeared in the door list. List nearby ones
+            // under "Portas" too (they're passages). lookDirection/playerPosition aside, the zone's
+            // own transform is where the player walks into it.
+            foreach (var zone in Object.FindObjectsOfType<TravelZone>())
+            {
+                if (zone == null) continue;
+                if (Vector3.Distance(playerPos, zone.transform.position) > NearbyDoorRadius) continue;
+                list.Add((DescribeTravelZone(zone), zone.transform.position, "Portas"));
+            }
+
+            // Round 107: bed was added unconditionally, so it showed even in the cellar ("a cama
+            // não deve aparecer ali na adega, é outra área"). The Location filter can't separate
+            // them (the cellar shares the tavern's Location), so gate it by proximity like every
+            // other item - 30 units covers the tavern building but excludes the far-off cellar.
             if (Bed.IsValid())
             {
-                list.Add(("Cama", Bed.GetPlayerBedPosition(), "Decorativos"));
+                // Round 113: route to where the SLEEP PROMPT actually triggers (the bed's
+                // sleepCollider) instead of GetPlayerBedPosition() - the user struggled to reach
+                // the bed ("foi uma luta encontrar ela"), and GetPlayerBedPosition can sit on a
+                // non-walkable tile making the route inconsistent. The sleepCollider centre is the
+                // walkable trigger zone where "quer dormir?" appears.
+                Vector3 bedTarget = (Bed.instance != null && Bed.instance.sleepCollider != null)
+                    ? (Vector3)Bed.instance.sleepCollider.bounds.center
+                    : Bed.GetPlayerBedPosition();
+                if (Vector3.Distance(playerPos, bedTarget) <= NearbyDoorRadius)
+                    list.Add(("Cama", bedTarget, "Decorativos"));
             }
 
             // User's explicit request: all items nearby too, same "by proximity" rule as
@@ -1124,6 +1351,16 @@ namespace TravellersRestAccess
                 list.Add((DescribePlaceable(placeable), GetApproachPosition(placeable.gameObject, playerPos), CategorizePlaceable(placeable)));
             }
 
+            // Round 112: the food prep table (NinjaPreparationTable) is its OWN MonoBehaviour, not
+            // necessarily a Placeable, so the loop above may miss it - scan it directly and list it
+            // under "Máquinas" (user: "essa mesa de menus não está aparecendo em maquinas"). Dedup
+            // at the end collapses it if it was also caught as a Placeable.
+            foreach (var prep in Object.FindObjectsOfType<NinjaPreparationTable>())
+            {
+                if (prep == null || Vector3.Distance(playerPos, prep.transform.position) > NearbyDoorRadius) continue;
+                list.Add(("Mesa de preparação", GetApproachPosition(prep.gameObject, playerPos), "Máquinas"));
+            }
+
             // User's explicit request: floor stains from the cleaning tutorial goal
             // ("Limpe as manchas do chão") weren't in the list at all - confirmed in
             // decompiled source they're a separate component (FloorDirt: MonoBehaviour,
@@ -1131,10 +1368,85 @@ namespace TravellersRestAccess
             // Tagged "Missão" per request - everything tied to the active goal goes there;
             // for now this covers floor stains specifically (the one confirmed live), not a
             // generic goal-to-object mapping for every future quest.
-            foreach (var dirt in Object.FindObjectsOfType<FloorDirt>())
+            // Approach position added (was raw dirt.transform.position) - same fix already
+            // applied to Placeable targets (see GetApproachPosition's barrel-in-a-wall note):
+            // a target's exact center isn't guaranteed to be a walkable tile, which made
+            // Home-key routing to floor stains unreliable ("rotas muito imprecisas").
+            // User's explicit report: "os bancos estão numerados errados" - root cause was
+            // ordering by LIVE distance-to-player, which changes every time the player moves
+            // even slightly, so "Mancha 1"/"Banco 1" could silently point at a different
+            // physical object between one Page Up/Down press and the next. Ordering by fixed
+            // world position instead (x then y) keeps the same object at the same number
+            // regardless of where the player is standing when the list gets rebuilt.
+            var nearbyDirt = Object.FindObjectsOfType<FloorDirt>()
+                .Where(d => Vector3.Distance(playerPos, d.transform.position) <= NearbyDoorRadius)
+                .OrderBy(d => d.transform.position.x).ThenBy(d => d.transform.position.y)
+                .ToList();
+            for (int i = 0; i < nearbyDirt.Count; i++)
             {
-                if (Vector3.Distance(playerPos, dirt.transform.position) > NearbyDoorRadius) continue;
-                list.Add(("Mancha no chão", dirt.transform.position, "Missão"));
+                // User's explicit request: tell stains apart when several are nearby -
+                // before this they were all identically named "Mancha no chão", making it
+                // impossible to know which one Page Up/Down had actually selected.
+                // User's explicit request: always number, even when there's only one -
+                // more predictable than switching format depending on count.
+                string dirtName = $"Mancha no chão {i + 1}";
+                list.Add((dirtName, GetApproachPosition(nearbyDirt[i].gameObject, playerPos), "Pendentes"));
+            }
+
+            // Round 107: the cellar rats ("Remova os ratos da adega" goal) - listed under
+            // "Pendentes", numbered by stable x-then-y order. Round 112: from the game's live list
+            // (SceneReferences.tutorialRats) instead of FindObjectsOfType - no scan cost.
+            var ratList = SceneReferences.GetSceneReferences()?.tutorialRats;
+            if (ratList != null)
+            {
+                var nearbyRats = ratList
+                    .Where(r => r != null && Vector3.Distance(playerPos, r.transform.position) <= NearbyDoorRadius)
+                    .OrderBy(r => r.transform.position.x).ThenBy(r => r.transform.position.y)
+                    .ToList();
+                for (int i = 0; i < nearbyRats.Count; i++)
+                {
+                    list.Add(($"Rato {i + 1}", GetApproachPosition(nearbyRats[i], playerPos), "Pendentes"));
+                }
+            }
+
+            // Same situation as floor stains: user reported benches announced fine by
+            // proximity (HandleSeatAnnouncement, which scans Seat directly) but missing from
+            // this Page Up/Down list - root cause confirmed by that exact mismatch: Seat
+            // isn't necessarily on the same GameObject as a Placeable (the attempted
+            // GetComponent<Seat>() check inside CategorizePlaceable, now removed, only ever
+            // ran for objects the Placeable loop above already found), so it needs its own
+            // direct loop here too, same as FloorDirt.
+            GameObject heldObjectForList = SelectObject.GetPlayer(1)?.selectedGameObject;
+            // Round 102: only list benches that still need action (NOT yet associated to a table).
+            // Once a bench is associated (Seat.table != null), the user asked to drop it from the
+            // pending list - it's done, no longer something to navigate to.
+            var nearbySeats = Object.FindObjectsOfType<Seat>()
+                .Where(s => s.table == null && !(s.placeable != null && s.placeable.gameObject == heldObjectForList) && Vector3.Distance(playerPos, s.transform.position) <= NearbyDoorRadius)
+                .OrderBy(s => s.transform.position.x).ThenBy(s => s.transform.position.y)
+                .ToList();
+            for (int i = 0; i < nearbySeats.Count; i++)
+            {
+                // Global number (see GetSeatNumber) instead of this list's own local index -
+                // user's explicit request was to be able to tell WHICH bench is which
+                // consistently, and a radius-filtered local index changes meaning between
+                // this list and the live proximity announcement.
+                string seatName = $"Banco {GetSeatNumber(nearbySeats[i])} (sem mesa)";
+                list.Add((seatName, GetApproachPosition(nearbySeats[i].gameObject, playerPos), "Pendentes"));
+            }
+
+            // User's explicit request: not just "a bench is somewhere near a table" but the
+            // EXACT spot(s) a table actually wants one - confirmed in decompiled Table.cs
+            // there's a real, precise answer: a private SeatingGroup[] (each with its own
+            // world Transform and an "occupied" bool already tracked by the game). No public
+            // getter exists, so reading it via reflection (AccessTools.Field) - this is just
+            // reading existing state, not patching/changing any game behavior.
+            // Round 112: use the cached seat/table arrays (refreshed by RefreshSeatSceneCache)
+            // instead of two fresh FindObjectsOfType scans every time the nav list is rebuilt.
+            var emptySlots = GetEmptySeatSlots(playerPos, NearbyDoorRadius, _cachedTables, _cachedSeats);
+            for (int i = 0; i < emptySlots.Count; i++)
+            {
+                string slotName = $"Lugar pra banco {emptySlots[i].slotNumber} ({emptySlots[i].tableLabel})";
+                list.Add((slotName, emptySlots[i].pos, "Pendentes"));
             }
 
             // User's explicit request: don't list things outside the tavern building while
@@ -1163,12 +1475,764 @@ namespace TravellersRestAccess
             return deduped;
         }
 
+        private static float _lastSeatSlotDiagLogTime;
+
+        // Looked up once instead of via AccessTools.Field on every call - reflection lookups
+        // aren't free, and this is now on a hot-ish path (every ~0.3s) since the lag fix.
+        private static readonly System.Reflection.FieldInfo SeatingGroupsField = AccessTools.Field(typeof(Table), "seatingGroups");
+
+        // Round 85 diagnostic - moving both the Placeable's and the Seat's own transform
+        // (rounds 82/84) still didn't fix table association. Seat.GetNeighbourTable actually
+        // reads from ITS OWN private "buildSquare" field (a BuildSquare component reference),
+        // not transform.position directly - and that field is never reassigned anywhere in the
+        // decompiled source, meaning it's a serialized/Inspector reference into the bench's
+        // prefab hierarchy. Walking the actual GameObject parent chain at runtime (not more
+        // guessing from decompiled text) to find out for certain whether buildSquare is a child
+        // of the Placeable, the Seat, both, or neither.
+        private static readonly System.Reflection.FieldInfo SeatBuildSquareField = AccessTools.Field(typeof(Seat), "buildSquare");
+
+        private static string DescribeHierarchy(Transform t)
+        {
+            if (t == null) return "(null)";
+            var names = new System.Collections.Generic.List<string>();
+            for (var cur = t; cur != null; cur = cur.parent) names.Add(cur.name);
+            names.Reverse();
+            return string.Join(" > ", names);
+        }
+
+        public static void LogBuildSquareHierarchy(Seat seat, GameObject placeableGO)
+        {
+            if (!Main.DebugMode || seat == null) return;
+            var buildSquare = SeatBuildSquareField.GetValue(seat) as Component;
+            DebugLogger.LogState($"WorldNav: hierarchy diag - Placeable=\"{DescribeHierarchy(placeableGO.transform)}\" pos={placeableGO.transform.position}");
+            DebugLogger.LogState($"WorldNav: hierarchy diag - Seat=\"{DescribeHierarchy(seat.transform)}\" pos={seat.transform.position}");
+            DebugLogger.LogState($"WorldNav: hierarchy diag - buildSquare=\"{(buildSquare != null ? DescribeHierarchy(buildSquare.transform) : "null")}\" pos={(buildSquare != null ? buildSquare.transform.position.ToString() : "n/a")}");
+        }
+
+        // User's explicit request: announce/identify WHICH bench was grabbed and WHICH table
+        // it ended up next to. Numbered GLOBALLY so "Banco 3" means the same physical bench
+        // whether it's mentioned by the live proximity announcement (small radius), the Page
+        // Up/Down list (large radius), or DecorationModeHandler's grab/place feedback.
+        //
+        // Round 70 bug, confirmed via log: the original version re-sorted ALL seats by their
+        // CURRENT position on every call - fine for seats that never move, but decoration mode
+        // exists specifically to MOVE them. Moving a bench changes its rank in that live sort,
+        // so the very same physical bench got a different number every time it was picked up
+        // (log showed object "1135 - Banco Grande(Clone)" announced as "Banco 8" twice, then
+        // "Banco 4" later, with no other bench involved). Fixed: assign each seat/table a
+        // number ONCE (first time anything asks about it, ordered by position AT THAT MOMENT
+        // among not-yet-numbered ones) and cache it permanently - subsequent moves don't
+        // reshuffle existing numbers, only newly-discovered seats/tables get appended.
+        private static readonly List<Seat> _numberedSeats = new List<Seat>();
+        private static readonly List<Table> _numberedTables = new List<Table>();
+
+        public static int GetSeatNumber(Seat seat)
+        {
+            if (!_numberedSeats.Contains(seat))
+            {
+                var newlyFound = Object.FindObjectsOfType<Seat>()
+                    .Where(s => !_numberedSeats.Contains(s))
+                    .OrderBy(s => s.transform.position.x).ThenBy(s => s.transform.position.y);
+                _numberedSeats.AddRange(newlyFound);
+            }
+            return _numberedSeats.IndexOf(seat) + 1;
+        }
+
+        public static int GetTableNumber(Table table)
+        {
+            if (!_numberedTables.Contains(table))
+            {
+                var newlyFound = Object.FindObjectsOfType<Table>()
+                    .Where(t => !_numberedTables.Contains(t))
+                    .OrderBy(t => t.transform.position.x).ThenBy(t => t.transform.position.y);
+                _numberedTables.AddRange(newlyFound);
+            }
+            return _numberedTables.IndexOf(table) + 1;
+        }
+
+        // Mirrors GetSeatNumber/GetTableNumber above - finds the Seat component that goes
+        // with a given Placeable's GameObject (they're never the same GameObject, see the
+        // "public Placeable placeable" note elsewhere in this file) so DecorationModeHandler
+        // can identify what it just grabbed/placed without duplicating this lookup.
+        public static Seat FindSeatForPlaceable(GameObject placeableGO)
+        {
+            if (placeableGO == null) return null;
+            foreach (var seat in Object.FindObjectsOfType<Seat>())
+            {
+                if (seat.placeable != null && seat.placeable.gameObject == placeableGO) return seat;
+            }
+            return null;
+        }
+
+        // Diagnostic only (no behavior change) - round 70's report that placing a bench
+        // "exactly" where the slot announcement says still gets rejected, and placing it
+        // nearby comes back "sem mesa por perto", needs real numbers to pin down rather than
+        // another guess. Confirmed via decompiled Seat.GetNeighbourTable/Table.GetSeatingGroup
+        // that matching depends on the seat's own facing direction (not just position) and a
+        // tight tolerance (0.225 units) - logs exactly how far off the final placement was from
+        // every nearby slot, and which way the seat ended up facing, so the next round's log can
+        // show the real gap instead of guessing at it again.
+        public static void LogSeatPlacementDiagnostics(Seat seat)
+        {
+            if (!Main.DebugMode || seat == null) return;
+            Vector3 seatPos = seat.transform.position;
+            Direction facing = seat.placeable != null ? seat.placeable.GetDirection() : Direction.Up;
+            DebugLogger.LogState($"WorldNav: seat placement diag - seat at {seatPos} facing={facing} table={(seat.table != null ? seat.table.gameObject.name : "null")}");
+            foreach (var table in Object.FindObjectsOfType<Table>())
+            {
+                if (Vector3.Distance(table.transform.position, seatPos) > TileSize * 6f) continue;
+                var groups = SeatingGroupsField.GetValue(table) as SeatingGroup[];
+                if (groups == null) continue;
+                foreach (var group in groups)
+                {
+                    if (group.transform == null) continue;
+                    float dist = Vector3.Distance(group.transform.position, seatPos);
+                    DebugLogger.LogState($"WorldNav: seat placement diag - table \"{table.gameObject.name}\" slot pos={group.transform.position} slotDir={group.direction} dist={dist:F3}");
+                }
+            }
+        }
+
+        // Round 87: round 86 found table=null even calling the engine's own search directly -
+        // so the search itself is missing the table, not a timing issue. GetNeighbourTable's
+        // exact search point is "buildSquare.GetCentrePosition() + Utils.NGFODNCHPHB(direction) *
+        // 0.5f", compared against tables within a tight 0.225 radius. GetSeatTargetPosition (our
+        // own placement formula, written in round 71 to avoid visually overlapping the table)
+        // ALSO adds slot.position + the same kind of 0.5-unit directional offset - if that offset
+        // and the engine's own search offset point the same way, they'd stack instead of
+        // cancelling, landing the search point roughly a tile-width past where the table actually
+        // is. Logging the literal search point vs every nearby table's position settles this with
+        // a number instead of more formula-reasoning.
+        public static void LogTableSearchGap(Seat seat)
+        {
+            if (!Main.DebugMode || seat == null) return;
+            var buildSquare = SeatBuildSquareField.GetValue(seat) as Component;
+            if (buildSquare == null) return;
+            var getCentrePosition = AccessTools.Method(buildSquare.GetType(), "GetCentrePosition");
+            Vector3 centre = (Vector3)getCentrePosition.Invoke(buildSquare, null);
+            Direction facing = seat.placeable != null ? seat.placeable.GetDirection() : Direction.Up;
+            Vector3 searchPos = centre + Utils.NGFODNCHPHB(facing) * 0.5f;
+            DebugLogger.LogState($"WorldNav: table search gap - buildSquare centre={centre} facing={facing} searchPos={searchPos}");
+            foreach (var table in Object.FindObjectsOfType<Table>())
+            {
+                float dist = Vector3.Distance(table.transform.position, searchPos);
+                if (dist > TileSize * 6f) continue;
+                DebugLogger.LogState($"WorldNav: table search gap - table \"{table.gameObject.name}\" pos={table.transform.position} distFromSearchPos={dist:F3}");
+            }
+
+            // Round 89: pivot-to-pivot distance is only a proxy - Seat.GetNeighbourTable's real
+            // check is Physics2D.OverlapCircleNonAlloc against actual colliders (excluding
+            // triggers), so a table with a collider larger than a point could still be found even
+            // several tenths of a unit past its pivot, or could be missed even when close if its
+            // collider is a trigger (explicitly skipped by that code) or on the wrong layer.
+            // Running the literal same query here removes all that guesswork.
+            var hits = Physics2D.OverlapCircleAll(searchPos, 0.225f, CommonReferences.GGFJGHHHEJC.objectLayers);
+            DebugLogger.LogState($"WorldNav: table search gap - live OverlapCircle at {searchPos} r=0.225 found {hits.Length} collider(s)");
+            foreach (var hit in hits)
+            {
+                var tableHit = hit.GetComponentInParent<Table>();
+                DebugLogger.LogState($"WorldNav: table search gap - hit \"{hit.gameObject.name}\" isTrigger={hit.isTrigger} layer={LayerMask.LayerToName(hit.gameObject.layer)} table={(tableHit != null ? tableHit.gameObject.name : "none")}");
+            }
+        }
+
+        // Round 90: generic "surface decoration" placement (paintings/plants/centerpieces etc,
+        // received from a shop order - see docs/modules/inventory-and-items.md). Read
+        // Placeable.PEFFMJOMPMN (called every frame from WhileSelected, same as the bench's
+        // GetNeighbourTable association) in full: items with isPlaceableOnSurface == true get
+        // auto-attached to whatever SurfaceSortOrder the CURSOR currently sits over
+        // (CursorManager.GetCursorWorldPosition() + mouse offset, fed into Utils.CCCCIKOMAEN -
+        // a Physics2D.OverlapPointAll wrapper - then filtered by SurfaceSortOrder.IsItemAllowed).
+        // Same class of problem as the bench's table search: that automatic system depends on the
+        // cursor truthfully tracking the held item, which round 82 proved it does NOT for
+        // keyboard-driven movement. Reusing the exact same point-overlap + IsItemAllowed check,
+        // just fed from the Placeable's OWN transform.position (which DecorationModeHandler does
+        // keep accurate) instead of the cursor - mirrors how the bench fix took direct ownership
+        // of GetNeighbourTable instead of trusting the automatic per-frame version.
+        public static SurfaceSortOrder FindSurfaceAtPosition(Vector3 position, Placeable placeable)
+        {
+            if (placeable == null || placeable.itemSetup == null) return null;
+            var hits = Utils.CCCCIKOMAEN<SurfaceSortOrder>(position);
+            foreach (var surface in hits)
+            {
+                if (surface != null && surface.IsItemAllowed(placeable.itemSetup.item, placeable, placeable.surfaceGOInstantiated))
+                {
+                    return surface;
+                }
+            }
+            return null;
+        }
+
+        // Guidance counterpart to FindNearestEmptySlot, for items that need ANY valid surface
+        // (table/shelf/etc with a SurfaceSortOrder) rather than a specific seating slot. No
+        // existing engine utility does this scene-wide search (confirmed - PEFFMJOMPMN only ever
+        // checks whatever's directly under the cursor, never searches for a nearby one), so this
+        // is new, not ported from a hidden game method.
+        public static SurfaceSortOrder FindNearestValidSurface(Vector3 position, float maxDistance, Placeable placeable)
+        {
+            if (placeable == null || placeable.itemSetup == null) return null;
+            SurfaceSortOrder best = null;
+            float bestDist = maxDistance;
+            foreach (var surface in Object.FindObjectsOfType<SurfaceSortOrder>())
+            {
+                if (surface == null) continue;
+                if (!surface.IsItemAllowed(placeable.itemSetup.item, placeable, placeable.surfaceGOInstantiated)) continue;
+                float dist = Vector3.Distance(position, surface.transform.position);
+                if (dist < bestDist)
+                {
+                    bestDist = dist;
+                    best = surface;
+                }
+            }
+            return best;
+        }
+
+        // Round 101: candles/tablecloths/centerpieces only COUNT for "Coloque seus novos itens
+        // na taverna" when they snap onto a designated SnapToPosition on a TABLE - the round-100
+        // log proved the candle was attaching to a generic surface named "Surface" with
+        // snapped=False every time, so it never registered. The game's own GetSnapItem picks the
+        // snap via the CURSOR (round 82 proved that's unreliable for us), so instead this scans
+        // the public snapToPositionArray of every surface directly, finds the nearest FREE snap
+        // whose item matches, and returns its exact world position. Snapping the item onto that
+        // point is what makes AddPlaceableToSurface set snappedToPosition = true.
+        public static Vector3? FindNearestSnapPosition(Vector3 position, float maxDistance, Placeable placeable, out SurfaceSortOrder owningSurface)
+        {
+            owningSurface = null;
+            if (placeable == null || placeable.itemSetup == null || placeable.itemSetup.item == null) return null;
+            int itemId = placeable.itemSetup.item.JDJGFAACPFC();
+            Vector3? best = null;
+            float bestDist = maxDistance;
+            foreach (var surface in Object.FindObjectsOfType<SurfaceSortOrder>())
+            {
+                if (surface == null || surface.snapToPositionArray == null) continue;
+                foreach (var snap in surface.snapToPositionArray)
+                {
+                    if (snap == null || snap.used || snap.transform == null) continue;
+                    bool matches = (snap.item != null && snap.item.JDJGFAACPFC() == itemId);
+                    if (!matches && snap.items != null)
+                    {
+                        foreach (var alt in snap.items)
+                        {
+                            if (alt != null && alt.JDJGFAACPFC() == itemId) { matches = true; break; }
+                        }
+                    }
+                    if (!matches) continue;
+                    float dist = Vector3.Distance(position, snap.transform.position);
+                    if (dist < bestDist)
+                    {
+                        bestDist = dist;
+                        best = snap.transform.position;
+                        owningSurface = surface;
+                    }
+                }
+            }
+            return best;
+        }
+
+        // Debug helper: log every surface near the held item that has a free snap position for it,
+        // so we can confirm whether snap-based placement (candles/tablecloths) has a real target.
+        public static void LogSnapTargets(Placeable placeable, float maxDistance)
+        {
+            if (placeable == null || placeable.itemSetup == null || placeable.itemSetup.item == null) return;
+            int itemId = placeable.itemSetup.item.JDJGFAACPFC();
+            Vector3 pos = placeable.transform.position;
+            int found = 0;
+            foreach (var surface in Object.FindObjectsOfType<SurfaceSortOrder>())
+            {
+                if (surface == null || surface.snapToPositionArray == null) continue;
+                for (int i = 0; i < surface.snapToPositionArray.Length; i++)
+                {
+                    var snap = surface.snapToPositionArray[i];
+                    if (snap == null || snap.transform == null) continue;
+                    bool matches = (snap.item != null && snap.item.JDJGFAACPFC() == itemId);
+                    if (!matches && snap.items != null)
+                        foreach (var alt in snap.items) if (alt != null && alt.JDJGFAACPFC() == itemId) { matches = true; break; }
+                    if (!matches) continue;
+                    found++;
+                    float dist = Vector3.Distance(pos, snap.transform.position);
+                    DebugLogger.LogState($"WorldNav: snap target surface=\"{surface.gameObject.name}\" snapPos={snap.transform.position} used={snap.used} dist={dist:F2}");
+                }
+            }
+            if (found == 0) DebugLogger.LogState($"WorldNav: NO snap target found for item id {itemId} (item does not use table snap positions, or none nearby)");
+        }
+
+        // Round 97: unified "nearest valid placement position" using the game's OWN
+        // IsObjectInValidLocation check, replacing the per-category replications. The round-93
+        // hand-rolled wall check (4 corners of itemBase.bounds vs WorldGrid tile flags) was
+        // confirmed wrong by the round-96 log: it returned a point (6.08, 910.10) the game's real
+        // Deselect/IsObjectInValidLocation rejected even a full frame later. The round-96 itemSpace
+        // variant already proved that temporarily moving the real object and calling the game's own
+        // check works perfectly (the plant placed). Generalizing that to ALL non-seat items - the
+        // game's check internally covers itemSpace, wall (itemBase) AND physicalSpace, so the point
+        // returned here is GUARANTEED to be one Enter will actually accept, instead of an
+        // approximation. Physics2D.SyncTransforms() forces Collider2D.bounds (read by the wall
+        // path) to update from each transform write within this synchronous loop. Candidates are
+        // checked nearest-first and it early-outs at the closest valid one, so the common case
+        // (a valid spot nearby) is cheap; only the "no valid spot anywhere" case pays the full scan.
+        // Round 104: find the nearest transform position where the painting's WALL geometry check
+        // passes, by replicating the game's own Placeable.FNPBNFFEBAF EXACTLY (verified by reading
+        // it - Placeable.cs:1688). The big correction this round: the validity check operates on
+        // the 4 corners of itemBase.bounds, NOT on transform.position (round 103 wrongly tested the
+        // transform against the wall-tile grid, which is why it kept guiding to spots that weren't
+        // actually placeable). FNPBNFFEBAF requires: all 4 bounds corners are wall tiles
+        // (WorldGrid.ALNFLFCLIEP) AND each has a floor below at one consistent height
+        // (WorldGrid.KHJJCAGIJAP). Both are pure tile-data lookups - STABLE, no physics flicker, so
+        // this can be scanned synchronously (unlike IsObjectInValidLocation, whose physicalSpace
+        // sub-check reads a FixedUpdate-only trigger list). The transform->bounds offset is
+        // item-specific, so it's measured at runtime from the live itemBase.bounds. Occupancy is a
+        // separate flicker-free distance check against existing wall Placeables. physicalSpace and
+        // the remaining IsObjectInValidLocation sub-checks are handled at confirm time by the
+        // settle-retry (which spans real frames). Returns the nearest passing transform position.
+        public static Vector3? FindNearestValidWallPosition(Placeable placeable, float maxDistance)
+        {
+            if (placeable == null || placeable.itemBase == null) return null;
+            Vector3 origin = placeable.transform.position;
+            Bounds b = placeable.itemBase.bounds;
+            Vector3 centerOffset = b.center - origin; // collider offset relative to the transform
+            Vector3 ext = b.extents;
+            var wallItems = Object.FindObjectsOfType<Placeable>()
+                .Where(p => p != null && p.isPlaceableOnWall && p.gameObject != placeable.gameObject)
+                .ToList();
+            const float step = 0.5f;
+            int range = Mathf.CeilToInt(maxDistance / step);
+            Vector3? best = null;
+            float bestDist = float.MaxValue;
+            for (int dx = -range; dx <= range; dx++)
+            {
+                for (int dy = -range; dy <= range; dy++)
+                {
+                    Vector3 c = new Vector3(origin.x + dx * step, origin.y + dy * step, origin.z);
+                    float d = Vector3.Distance(origin, c);
+                    if (d > maxDistance || d >= bestDist) continue;
+                    if (!WallGeometryValidAt(c + centerOffset, ext)) continue;
+                    if (wallItems.Any(w => Vector3.Distance(w.transform.position, c) < step)) continue;
+                    best = c;
+                    bestDist = d;
+                }
+            }
+            return best;
+        }
+
+        // Exact replica of Placeable.FNPBNFFEBAF (Placeable.cs:1688) for a candidate bounds centre.
+        private static bool WallGeometryValidAt(Vector3 boundsCenter, Vector3 ext)
+        {
+            Vector2[] corners =
+            {
+                new Vector2(boundsCenter.x - ext.x, boundsCenter.y + ext.y),
+                new Vector2(boundsCenter.x + ext.x, boundsCenter.y + ext.y),
+                new Vector2(boundsCenter.x - ext.x, boundsCenter.y - ext.y),
+                new Vector2(boundsCenter.x + ext.x, boundsCenter.y - ext.y),
+            };
+            float height = -1000f;
+            foreach (var corner in corners)
+            {
+                if (!WorldGrid.ALNFLFCLIEP(corner)) return false;
+                if (!WorldGrid.KHJJCAGIJAP(corner, out float floorY)) return false;
+                float h = (float)(int)(floorY * 2f) / 2f;
+                if (height == -1000f || height == h) { height = h; continue; }
+                return false;
+            }
+            return true;
+        }
+
+        public static Vector3? FindNearestValidPosition(Placeable placeable, float maxDistance)
+        {
+            if (placeable == null) return null;
+            Vector3 original = placeable.transform.position;
+            const float step = 0.5f;
+            int range = Mathf.CeilToInt(maxDistance / step);
+
+            var candidates = new System.Collections.Generic.List<Vector3>();
+            for (int dx = -range; dx <= range; dx++)
+            {
+                for (int dy = -range; dy <= range; dy++)
+                {
+                    Vector3 c = new Vector3(original.x + dx * step, original.y + dy * step, original.z);
+                    if (Vector3.Distance(original, c) <= maxDistance) candidates.Add(c);
+                }
+            }
+            candidates.Sort((a, b) => Vector3.Distance(original, a).CompareTo(Vector3.Distance(original, b)));
+
+            Vector3? best = null;
+            foreach (var c in candidates)
+            {
+                placeable.transform.position = c;
+                Physics2D.SyncTransforms();
+                if (placeable.IsObjectInValidLocation(false)) { best = c; break; }
+            }
+            placeable.transform.position = original;
+            Physics2D.SyncTransforms();
+            if (Main.DebugMode && !best.HasValue)
+            {
+                DebugLogger.LogState($"WorldNav: FindNearestValidPosition - NO valid spot within {maxDistance} of {original} ({candidates.Count} candidates checked) - if this is a wall item it may need a different facing/rotation, or there's no valid wall in range");
+            }
+            return best;
+        }
+
+        // Round 99: the painting (wall) and tablecloth (surface) report "Posição válida" /
+        // "bem aqui" but Deselect still returns false. Reading the decompiled Placeable.Deselect
+        // (line 1847) showed the real gate is IsObjectInValidLocation(BIOKGEFFNAA: TRUE) - we only
+        // ever checked (false) - plus DeselectAction's own canBePlaced check. canBePlaced is a
+        // dead field (always true, confirmed), so the divergence has to be in the validity check
+        // itself OR the object's live state (currentSurface, collider bounds) at the exact deselect
+        // moment differing from when we searched. Logs every input to that decision right before
+        // Deselect runs, so the next test pins the exact failing sub-check instead of more theory.
+        public static void LogDeselectGate(Placeable p, string context)
+        {
+            if (p == null) return;
+            Physics2D.SyncTransforms();
+            bool validFalse = p.IsObjectInValidLocation(false);
+            bool validTrue = p.IsObjectInValidLocation(true);
+            bool physOk = p.physicalSpace == null || p.physicalSpace.ValidPosition();
+            DebugLogger.LogState($"WorldNav: deselect gate [{context}] pos={p.transform.position} validFalse={validFalse} validTrue={validTrue} canBePlaced={p.canBePlaced} enabled={p.enabled} attachedToPlaceable={(p.attachedToPlaceable != null)} isPlaceableOnWall={p.isPlaceableOnWall} isPlaceableOnSurface={p.isPlaceableOnSurface} currentSurface={(p.currentSurface != null ? p.currentSurface.gameObject.name : "null")} isOnSurface={p.IsObjectOnASurface()} physicalSpaceOk={physOk}");
+        }
+
+        // Round 94: log proved the plant ("Planta Moribunda", hasItemSpace=True, no surface/wall)
+        // never reached "Posição válida" anywhere across many grab+arrow-move attempts, even
+        // though it uses the same generic itemSpace check benches do (which DOES work). Rather
+        // than guess why (e.g. grid-alignment theory), replicate ItemSpace.IsItemSpaceValid's own
+        // per-buildSquare checks here (both are public APIs) so the next test's log shows exactly
+        // which check is failing instead of more speculation.
+        public static void LogItemSpaceValidityDiagnostic(Placeable placeable)
+        {
+            if (placeable == null || placeable.itemSpace == null || placeable.currentSurface != null) return;
+            var buildSquares = placeable.itemSpace.buildSquares;
+            if (buildSquares == null) return;
+            for (int i = 0; i < buildSquares.Length; i++)
+            {
+                var square = buildSquares[i];
+                if (square == null)
+                {
+                    DebugLogger.LogState($"WorldNav: itemSpace diag - buildSquare {i} is null");
+                    continue;
+                }
+                Vector3 centre = square.GetCentrePosition();
+                Location location = WorldGrid.HJPCBBGHPDA(centre);
+                bool locationOk = placeable.IsInValidLocation(location);
+                bool squareValid = square.IsValid(placeable.itemSpace, placeable.attachedToPlaceable, true, placeable.specificRules, placeable.itemSpace.checkConstructionPositions, placeable.itemSpace.checkHerbs);
+                // Round 94 follow-up: squareValid alone doesn't say WHICH of BuildSquare.IsValid's
+                // several gates (zone type, ground type, wall tile, player overlap) is the real
+                // rejection - replicating those specific sub-checks too (all public APIs) instead
+                // of guessing from the single boolean.
+                ZoneType zoneHere = WorldGrid.AGKGGAFFFGM(centre);
+                GroundType groundHere = WorldGrid.NCEHFMPBBAK(centre);
+                bool isWallTile = WorldGrid.ALNFLFCLIEP(centre);
+                float distToPlayer = Vector3.Distance(centre, PlayerController.GetPlayerPosition(1));
+                // Round 95: round 94's diagnostic ruled out location/zone/ground/wall (all fine
+                // away from the wall) yet squareValid stayed False even 8-10 units from the
+                // player - pointing at BuildSquare.IsValid's last gate, WorldGrid.NGDHDMAMGPI
+                // (checks WorldTile.canPlaceObjects and whether blockingObjects is already
+                // registered there - the real "is this tile occupied by clutter" check, separate
+                // from a live Physics2D overlap). Reading the WorldTile directly (both public)
+                // to log the actual blocker by name instead of just a boolean.
+                bool canPlaceObjects = false;
+                string blockingNames = "n/a";
+                if (WorldGrid.GCGNCHFNEBJ(centre, out WorldTile tile))
+                {
+                    canPlaceObjects = tile.canPlaceObjects;
+                    blockingNames = tile.blockingObjects == null ? "none" : string.Join(",", tile.blockingObjects.ConvertAll(go => go != null ? go.name : "null"));
+                }
+                DebugLogger.LogState($"WorldNav: itemSpace diag - square {i} pos={centre} location={location} locationOk={locationOk} squareValid={squareValid} zoneHere={zoneHere} zoneNeeded={placeable.zoneTypeNeeded} groundHere={groundHere} groundNeeded={placeable.groundTypeNeeded} isWallTile={isWallTile} distToPlayer={distToPlayer:F2} attachedToPlayer={placeable.attachedToPlayer} canPlaceObjects={canPlaceObjects} blockingObjects={blockingNames}");
+            }
+        }
+
+        // Same stability problem and same fix as GetSeatNumber/GetTableNumber - SeatingGroup is
+        // a reference type (a plain serialized class, not a struct), so its identity persists
+        // across calls even though it has no transform of its own to be "the same GameObject" -
+        // safe to use directly as a list key like the Seat/Table components above.
+        private static readonly List<SeatingGroup> _numberedSlots = new List<SeatingGroup>();
+
+        public static int GetSlotNumber(SeatingGroup group)
+        {
+            if (!_numberedSlots.Contains(group))
+            {
+                var allGroups = new List<SeatingGroup>();
+                foreach (var table in Object.FindObjectsOfType<Table>())
+                {
+                    var groups = SeatingGroupsField.GetValue(table) as SeatingGroup[];
+                    if (groups != null) allGroups.AddRange(groups.Where(g => g != null && g.transform != null));
+                }
+                var newlyFound = allGroups.Where(g => !_numberedSlots.Contains(g))
+                    .OrderBy(g => g.transform.position.x).ThenBy(g => g.transform.position.y);
+                _numberedSlots.AddRange(newlyFound);
+            }
+            return _numberedSlots.IndexOf(group) + 1;
+        }
+
+        // Round 71 feature: user explicitly asked for automatic snap-to-slot + auto-rotate on
+        // placement instead of needing to hit the exact mark by hand (confirmed very hard with
+        // 0.5-unit cursor steps against a 0.225-unit engine tolerance that also depends on
+        // facing direction - see LogSeatPlacementDiagnostics above). Called once, only when
+        // Enter is pressed to confirm a Seat's placement (not a hot per-frame path), so a fresh
+        // scan here is fine. maxDistance is deliberately more forgiving than the engine's own
+        // 0.225 - the player only needs to walk UP TO a slot, not hit it pixel-perfect; this
+        // function (and DecorationModeHandler) does the exact alignment from there.
+        // Round 76: DecorationModeHandler started calling FindNearestEmptySlot every 0.3s while
+        // a bench is held (for the live guidance announcement), but this method was calling
+        // Object.FindObjectsOfType<Table>() AND <Seat>() directly EVERY call - given the
+        // ~150-180ms per-call cost confirmed in round 74's timers, that's ~300ms+ of stall every
+        // 0.3 seconds while holding something, a severe regression nobody had measured yet.
+        // Static cache shared by this method and LogNearestSlotDistance below, same "identity is
+        // stable, only position changes" reasoning as WorldNavigationHandler's instance-level
+        // seat/table cache - just needs its own copy since this is a static method.
+        private static Table[] _staticCachedTables;
+        private static Seat[] _staticCachedSeats;
+        private static float _staticCacheTime = -999f;
+        private const float StaticSceneCacheInterval = 20f;
+
+        private static void RefreshStaticSceneCache()
+        {
+            if (_staticCachedTables != null && Time.unscaledTime - _staticCacheTime < StaticSceneCacheInterval) return;
+            _staticCacheTime = Time.unscaledTime;
+            _staticCachedTables = Object.FindObjectsOfType<Table>();
+            _staticCachedSeats = Object.FindObjectsOfType<Seat>();
+        }
+
+        public static SeatingGroup FindNearestEmptySlot(Vector3 position, float maxDistance, out Table ownerTable)
+        {
+            RefreshStaticSceneCache();
+            ownerTable = null;
+            GameObject heldNow = SelectObject.GetPlayer(1)?.selectedGameObject;
+            SeatingGroup best = null;
+            float bestDist = maxDistance;
+            foreach (var table in _staticCachedTables)
+            {
+                if (table == null) continue;
+                var groups = SeatingGroupsField.GetValue(table) as SeatingGroup[];
+                if (groups == null) continue;
+                foreach (var group in groups)
+                {
+                    if (group.transform == null) continue;
+                    float dist = Vector3.Distance(position, group.transform.position);
+                    if (dist > bestDist) continue;
+                    bool occupiedByRealSeat = false;
+                    foreach (var seat in _staticCachedSeats)
+                    {
+                        if (seat == null) continue;
+                        bool held = seat.placeable != null && seat.placeable.gameObject == heldNow;
+                        if (held) continue;
+                        if (Vector3.Distance(seat.transform.position, group.transform.position) < 0.3f)
+                        {
+                            occupiedByRealSeat = true;
+                            break;
+                        }
+                    }
+                    if (occupiedByRealSeat) continue;
+                    best = group;
+                    bestDist = dist;
+                    ownerTable = table;
+                }
+            }
+            return best;
+        }
+
+        // Round 76: DecorationModeHandler now locks onto one target slot per hold (instead of
+        // re-picking "nearest" every check, which flip-flopped between two similarly-close slots
+        // and never converged - confirmed in log: the announced distance oscillated between two
+        // values, e.g. "9 pra direita"/"10 pra direita", dozens of times). This lets it confirm
+        // the lock is still good (nobody else took the slot in the meantime) without re-running
+        // the full nearest-search.
+        public static bool IsSlotEmpty(SeatingGroup slot)
+        {
+            RefreshStaticSceneCache();
+            GameObject heldNow = SelectObject.GetPlayer(1)?.selectedGameObject;
+            foreach (var seat in _staticCachedSeats)
+            {
+                if (seat == null) continue;
+                bool held = seat.placeable != null && seat.placeable.gameObject == heldNow;
+                if (held) continue;
+                if (Vector3.Distance(seat.transform.position, slot.transform.position) < 0.3f)
+                {
+                    // Round 77 diagnostic - the locked slot kept getting dropped/re-picked
+                    // within under a second of being locked, with no key pressed in between.
+                    // Logging exactly which seat caused IsSlotEmpty to reject it, instead of
+                    // guessing further.
+                    if (Main.DebugMode)
+                    {
+                        bool heldByGameObjectName = seat.placeable != null && heldNow != null && seat.placeable.gameObject.name == heldNow.name;
+                        DebugLogger.LogState($"WorldNav: IsSlotEmpty - slot pos={slot.transform.position} rejected by seat \"{seat.gameObject.name}\" (instanceId={seat.GetInstanceID()}) seatPos={seat.transform.position} seat.placeable={(seat.placeable != null ? seat.placeable.gameObject.name + " (id=" + seat.placeable.gameObject.GetInstanceID() + ")" : "null")} heldNow={(heldNow != null ? heldNow.name + " (id=" + heldNow.GetInstanceID() + ")" : "null")} sameNameButDifferentId={heldByGameObjectName && (seat.placeable.gameObject != heldNow)}");
+                    }
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // Round 73 diagnostic only - FindNearestEmptySlot above silently returns null whenever
+        // nothing qualifies within maxDistance, which doesn't say HOW far the real nearest slot
+        // actually was. Called only when a snap attempt fails to find anything, to get a real
+        // distance number instead of guessing whether the radius is too tight.
+        public static void LogNearestSlotDistance(Vector3 position)
+        {
+            if (!Main.DebugMode) return;
+            RefreshStaticSceneCache();
+            SeatingGroup nearest = null;
+            Table nearestTable = null;
+            float nearestDist = float.MaxValue;
+            foreach (var table in _staticCachedTables)
+            {
+                if (table == null) continue;
+                var groups = SeatingGroupsField.GetValue(table) as SeatingGroup[];
+                if (groups == null) continue;
+                foreach (var group in groups)
+                {
+                    if (group.transform == null) continue;
+                    float dist = Vector3.Distance(position, group.transform.position);
+                    if (dist < nearestDist) { nearestDist = dist; nearest = group; nearestTable = table; }
+                }
+            }
+            if (nearest == null)
+            {
+                DebugLogger.LogState("WorldNav: snap diag - no seating slot exists anywhere in the scene");
+            }
+            else
+            {
+                DebugLogger.LogState($"WorldNav: snap diag - nearest slot is {nearestDist:F2} units away (table \"{nearestTable.gameObject.name}\", slot pos={nearest.transform.position}, slotDir={nearest.direction})");
+            }
+        }
+
+        // Round 72 bug fix: the snap-to-slot feature placed the bench's own centre AT
+        // group.transform.position directly - every attempt then failed canBePlaced (log:
+        // "confirm placement -> False snapped=True", repeated). Re-derived the right target
+        // from the engine's own formulas instead of guessing again: `Seat.GetNeighbourTable`
+        // looks for a table near (seat's own centre + facing direction * 0.5), and
+        // `Table.GetSeatingGroup` checks that the SAME kind of point (slot tile + slot's
+        // direction * 0.5) is free/walkable - in both cases the "+ direction * 0.5" step moves
+        // from the TABLE side to the SEAT side. So group.transform.position is the table-edge
+        // reference point, not the seat's own resting spot - the seat's centre needs to be
+        // pushed OUTWARD from the table by half a tile, in the slot's own direction, to clear
+        // the table's footprint instead of overlapping it.
+        //
+        // Round 89: that "group.transform.position is the table-edge reference point" line was
+        // never actually verified against the table's own data - it was an assumption, and it's
+        // the reason rounds 87/88 still measured a 0.6-0.8 unit gap after fixing the facing
+        // direction. Read Table.PlaceSeatingGroup in full: the engine's OWN code computes this
+        // exact target as "placeable.itemSpace.buildSquares[slot.buildSquares.x].
+        // GetCentrePosition() + Utils.NGFODNCHPHB(Utils.ABNPPDOGEPM(seatDirection)) * 0.5f" - i.e.
+        // it starts from one of the TABLE's own buildSquare cells (the specific cell this seating
+        // group is attached to), not from the slot's transform. Using the literal same source
+        // value instead of the group marker removes the guesswork the round-72 comment above was
+        // built on.
+        public static Vector3 GetSeatTargetPosition(SeatingGroup slot, Table ownerTable)
+        {
+            if (ownerTable != null && ownerTable.placeable != null && ownerTable.placeable.itemSpace != null)
+            {
+                var tableBuildSquares = ownerTable.placeable.itemSpace.buildSquares;
+                int idx = slot.buildSquares.x;
+                if (idx >= 0 && idx < tableBuildSquares.Length && tableBuildSquares[idx] != null)
+                {
+                    return tableBuildSquares[idx].GetCentrePosition() + Utils.NGFODNCHPHB(slot.direction) * 0.5f;
+                }
+            }
+            return slot.transform.position + Utils.NGFODNCHPHB(slot.direction) * 0.5f;
+        }
+
+        // Shared by BuildTargetList (nav list) and HandleSeatSlotAnnouncement (proximity
+        // speech) - see the "Lugar pra banco" note above for why this reads a private field.
+        // Takes the scene-wide table/seat arrays as parameters instead of scanning internally
+        // (lag fix - the caller now controls how often that expensive scan actually happens;
+        // BuildTargetList, only called on demand by Page Up/Down, scans fresh every time,
+        // while the per-frame proximity caller passes the once-a-second cache instead).
+        private static List<(Vector3 pos, string tableLabel, int slotNumber)> GetEmptySeatSlots(Vector3 playerPos, float radius, Table[] allTables, Seat[] allSeats)
+        {
+            // Round 112: cheap early-out. If no table is within range there are no slots to
+            // compute - skip the whole reflection/distance scan. The log showed this running every
+            // ~1.5s at ~15ms even at the oven (far from any table, "0 slots" every time), a real
+            // continuous micro-stutter.
+            bool anyTableNear = false;
+            if (allTables != null)
+            {
+                foreach (var t in allTables)
+                {
+                    if (t != null && Vector3.Distance(playerPos, t.transform.position) <= radius) { anyTableNear = true; break; }
+                }
+            }
+            if (!anyTableNear) return new List<(Vector3 pos, string tableLabel, int slotNumber)>();
+
+            // Numbered GLOBALLY across the WHOLE scene (not just the nearby/radius-filtered
+            // subset) for the same reason as GetSeatNumber/GetTableNumber above - so "vaga 2"
+            // means the same physical slot whether it's the live proximity announcement (small
+            // radius) or the Page Up/Down list (large radius) asking.
+            var allTablesOrdered = allTables
+                .Where(t => t != null)
+                .OrderBy(t => t.transform.position.x).ThenBy(t => t.transform.position.y)
+                .ToList();
+            // User's explicit request to validate, not assume: the debug log added last round
+            // confirmed `occupied` NEVER flips true (checked a full play session's worth of
+            // log lines, all `occupied=False`, even right after placing a bench) - and
+            // `Table.PlaceSeatingGroup`/`GetSeatingGroup` (the only methods that ever write to
+            // it) are confirmed to have ZERO call sites anywhere in decompiled source. This
+            // flag just isn't maintained by any currently-active code path - not a timing
+            // issue, not our bug. Falling back to a real, computed check instead: is there
+            // already a Seat sitting close to this slot's position right now.
+            GameObject heldNow = SelectObject.GetPlayer(1)?.selectedGameObject;
+            var allEmptySlots = new List<(Vector3 pos, string tableLabel, SeatingGroup group)>();
+            for (int t = 0; t < allTablesOrdered.Count; t++)
+            {
+                var groups = SeatingGroupsField.GetValue(allTablesOrdered[t]) as SeatingGroup[];
+                if (groups == null) continue;
+                // Same stability fix as GetSeatNumber/GetTableNumber - this table can itself be
+                // moved in decoration mode, so a live re-sorted index would relabel it too.
+                string tableLabel = $"mesa {GetTableNumber(allTablesOrdered[t])}";
+                foreach (var group in groups)
+                {
+                    if (group.transform == null) continue;
+                    bool occupiedByRealSeat = false;
+                    foreach (var seat in allSeats)
+                    {
+                        if (seat == null) continue;
+                        bool held = seat.placeable != null && seat.placeable.gameObject == heldNow;
+                        if (held) continue;
+                        if (Vector3.Distance(seat.transform.position, group.transform.position) < 0.3f) { occupiedByRealSeat = true; break; }
+                    }
+                    if (Main.DebugMode && Time.unscaledTime - _lastSeatSlotDiagLogTime > 1f)
+                    {
+                        DebugLogger.LogState($"WorldNav: seating group for \"{allTablesOrdered[t].gameObject.name}\" gameOccupiedFlag={group.occupied} realSeatNearby={occupiedByRealSeat} pos={group.transform.position}");
+                    }
+                    if (occupiedByRealSeat) continue;
+                    allEmptySlots.Add((group.transform.position, tableLabel, group));
+                }
+            }
+            if (Main.DebugMode && Time.unscaledTime - _lastSeatSlotDiagLogTime > 1f) _lastSeatSlotDiagLogTime = Time.unscaledTime;
+
+            // Slot numbers come from GetSlotNumber (assigned once, stable forever) instead of a
+            // recomputed index here - same instability class as GetSeatNumber/GetTableNumber:
+            // the table (and therefore its slots, which are children of it) can be moved in
+            // decoration mode, which would otherwise reshuffle "vaga N" for slots that never
+            // moved relative to each other.
+            var result = new List<(Vector3 pos, string tableLabel, int slotNumber)>();
+            foreach (var slot in allEmptySlots)
+            {
+                if (Vector3.Distance(playerPos, slot.pos) > radius) continue;
+                result.Add((slot.pos, slot.tableLabel, GetSlotNumber(slot.group)));
+            }
+            return result;
+        }
+
         // Classified by real component types confirmed in decompiled source (Container.cs,
         // Crafter.cs, Placeable.canBeAddedToInventory) - not guessed from names.
         private static string CategorizePlaceable(Placeable placeable)
         {
+            // Round 102: a placed candle is a working consumable - user wants it under
+            // "Repositivos" (restockables) while still lit, but moved to "Pendentes" once fully
+            // spent (needs replacing). Checked BEFORE the Crafter branch (the candle carries a
+            // Crafter). Spent threshold is the game's own (Crafter fuel <= 1).
+            if (placeable.itemSetup != null && placeable.itemSetup.item != null
+                && placeable.itemSetup.item.JDJGFAACPFC() == CandleItemId)
+            {
+                var candleCrafter = placeable.GetComponent<Crafter>() ?? placeable.GetComponentInChildren<Crafter>();
+                return (candleCrafter != null && candleCrafter.LCCABPFHCOL <= 1) ? "Pendentes" : "Repositivos";
+            }
+            // Round 112/113: crafting/serving stations the user wants under "Máquinas" - the drinks
+            // table/dispenser, the barrels and the food prep table. Checked BEFORE Container, since
+            // DrinkDispenser/BanquetBarrel ARE Containers but the user wants them as machines.
+            if (IsDrinkStation(placeable) != null
+                || placeable.GetComponent<NinjaPreparationTable>() != null || placeable.GetComponentInChildren<NinjaPreparationTable>() != null)
+            {
+                return "Máquinas";
+            }
             if (placeable.GetComponent<Container>() != null) return "Containers";
             if (placeable.GetComponent<Crafter>() != null) return "Máquinas";
+            string nm = placeable.gameObject.name.ToLowerInvariant();
+            if (nm.Contains("bebida") || nm.Contains("preparac") || nm.Contains("preparation")) return "Máquinas";
 
             // User's explicit correction: a cellar door and a staircase (both Placeable,
             // not Door component - that's why they end up here instead of the dedicated
@@ -1189,7 +2253,7 @@ namespace TravellersRestAccess
             var table = placeable.GetComponent<Table>();
             if (table != null && table.JNHCCCBICDM != TableDirtLevel.Perfect && table.JNHCCCBICDM != TableDirtLevel.Clean)
             {
-                return "Missão";
+                return "Pendentes";
             }
 
             if (placeable.canBeAddedToInventory) return "Coletáveis";
@@ -1255,8 +2319,79 @@ namespace TravellersRestAccess
             return name == "Door" ? "Porta" : name;
         }
 
+        // Round 107: a passage between areas (cellar exit etc.). Named by where it leads when
+        // that's known (locationTo), else by the cleaned GameObject name.
+        private static string DescribeTravelZone(TravelZone zone)
+        {
+            string loc = LocationName(zone.locationTo);
+            if (!string.IsNullOrEmpty(loc)) return $"Passagem para {loc}";
+            string n = zone.gameObject.name.Replace("TravelZone-", "").Replace("TravelZone", "").Trim();
+            return string.IsNullOrEmpty(n) ? "Passagem" : $"Passagem: {n}";
+        }
+
+        private static string LocationName(Location loc)
+        {
+            switch (loc)
+            {
+                case Location.Tavern: return "a taverna";
+                case Location.City:
+                case Location.CityOutside: return "a cidade";
+                case Location.CityTavern: return "a taverna da cidade";
+                case Location.Road: return "a estrada";
+                case Location.River: return "o rio";
+                case Location.Quarry: return "a pedreira";
+                case Location.Farm: return "a fazenda";
+                case Location.Mine: return "a mina";
+                case Location.Beach: return "a praia";
+                case Location.Forest: return "a floresta";
+                case Location.Camp: return "o acampamento";
+                default: return null;
+            }
+        }
+
+        // Round 113: drink-serving stations the user wants clearly named and under "Máquinas":
+        // DrinkDispenser/DrinksTable (accept all drink types) -> "Dispensador de bebidas";
+        // ServiceBarrel/BanquetBarrel (only sparkling) -> "Barril". Returns null if not one.
+        private static string IsDrinkStation(Placeable placeable)
+        {
+            if (placeable == null) return null;
+            // Round 114/116: the "mesa de menu" (BarMenuManager, opens BigContainerUI) - where the
+            // player adds cooked food to the tavern menu. Round 116 fix: BarMenuManager lives on a
+            // DIFFERENT GameObject and references its Placeable via .placeable, so GetComponent on
+            // the placeable missed it and it fell through to the drink-dispenser name. Compare
+            // against BarMenuManager.instance.placeable directly (robust), plus the name fallback.
+            var barMenu = BarMenuManager.instance;
+            if ((barMenu != null && barMenu.placeable == placeable)
+                || placeable.GetComponent<BarMenuManager>() != null || placeable.GetComponentInChildren<BarMenuManager>() != null
+                || placeable.gameObject.name.Contains("BigContainer"))
+                return "Mesa de menu";
+            // Barrels FIRST: a ServiceBarrel CONTAINS a DrinkDispenser (confirmed: ServiceBarrel
+            // .drinkDispenser), so a barrel GameObject has both - "Barril" is the more specific name.
+            if (placeable.GetComponent<ServiceBarrel>() != null || placeable.GetComponentInChildren<ServiceBarrel>() != null
+                || placeable.GetComponent<BanquetBarrel>() != null || placeable.GetComponentInChildren<BanquetBarrel>() != null)
+                return "Barril";
+            // Round 121: there are several drink dispensers - differentiate them by the drink they
+            // hold (lastDrink), since sighted players tell them apart by colour. Falls back to the
+            // dispenser id when empty.
+            var dd = placeable.GetComponent<DrinkDispenser>() ?? placeable.GetComponentInChildren<DrinkDispenser>();
+            if (dd != null)
+            {
+                var drink = dd.lastDrink?.LHBPOPOIFLE();
+                string drinkName = drink != null ? drink.IABAKHPEOAF() : null;
+                return !string.IsNullOrEmpty(drinkName) ? $"Dispensador de bebidas, {drinkName}" : $"Dispensador de bebidas {dd.drinkDispenserId}";
+            }
+            if (placeable.GetComponent<DrinksTable>() != null || placeable.GetComponentInChildren<DrinksTable>() != null)
+                return "Dispensador de bebidas";
+            return null;
+        }
+
         private static string DescribePlaceable(Placeable placeable)
         {
+            // Round 113: name the drink stations explicitly (before the itemSetup name, which is
+            // either missing - "Mesa de Bebidas" had none - or the generic "Barril").
+            string drinkName = IsDrinkStation(placeable);
+            if (drinkName != null) return drinkName;
+
             // User reported confusing/cryptic names ("dispenser de bebidas", "armário
             // grande, sei lá") from the GameObject-name heuristic. Placeable has a direct
             // reference to the real Item data (Placeable.itemSetup.item) - using the item's
@@ -1315,6 +2450,744 @@ namespace TravellersRestAccess
             { "Cellar Door", "Porta do Porão" },
         };
 
+        private void HandleFloorDirtAnnouncement()
+        {
+            var manager = InputByProximityManager.GetPlayer(1);
+            if (manager == null) return;
+
+            var current = manager.GetCurrentFocusedInputElement();
+            FloorDirt currentDirt = current?.mainGameObject != null ? current.mainGameObject.GetComponent<FloorDirt>() : null;
+
+            if (currentDirt == _lastFloorDirtFocus) return;
+            _lastFloorDirtFocus = currentDirt;
+            if (currentDirt == null) return;
+
+            ScreenReader.Say("Próximo: Mancha no chão: segure E pra limpar", interrupt: false);
+            if (Main.DebugMode) DebugLogger.LogState("WorldNav: FloorDirt proximity announcement spoken");
+        }
+
+        // User reported the game lagging/freezing badly after these were added - root cause:
+        // Throttling just the ANNOUNCEMENT logic (0.3s, last round's fix) wasn't enough on its
+        // own - the user still reported lag. Root cause: it only throttled how often the
+        // expensive Object.FindObjectsOfType (full scene scan) calls ran, but each cycle still
+        // fired up to 3 separate scans (Seat here, Seat again + Table inside
+        // GetEmptySeatSlots) - ~10/sec total, far more than the established pattern elsewhere
+        // (ItemSoundCycleInterval: ONE scan per second). Splitting the concern properly now:
+        // the scene scan itself is cached for a full second (matching that pattern) and shared
+        // between both seat methods, while the cheap distance-check/announcement logic that
+        // reads the cache can run every frame without needing its own throttle.
+        private Seat[] _cachedSeats = new Seat[0];
+        private Table[] _cachedTables = new Table[0];
+        private float _lastSeatSceneCacheTime = -999f;
+
+        // Round 74: found the REAL cause of "muito lento" via the round-73 timers - it was
+        // never about how MANY scans ran per second, it's that a single
+        // Object.FindObjectsOfType<T>() call in this scene costs ~150-180ms by itself (measured
+        // live - confirmed in the PERF log even with only 8 seats/1 table as the result), almost
+        // certainly because the call's cost scales with the TOTAL object count in the scene
+        // (lots of decorative tiles/props), not the small number actually returned. Once per
+        // second was still far too often at that per-call cost. Since seat/table IDENTITY is
+        // stable (confirmed across the numbering work - decoration mode only moves them, never
+        // destroys/recreates them) and their live positions already come for free from the
+        // cached objects' own transforms, there's no need to re-fetch the array itself often -
+        // widened drastically; this is a safety net against rare cases (new construction) more
+        // than a "needs to be fresh every second" requirement.
+        private const float SeatSceneCacheInterval = 30f;
+
+        // Round 102: placed candles (id 605) for the proximity announcement below. Round 113:
+        // derived from the shared _cachedAllPlaceables scan instead of its own pass.
+        private Placeable[] _cachedCandles = new Placeable[0];
+
+        // Round 113: ONE cached scan of all Placeables, shared by the candle proximity AND the
+        // item-proximity sounds. HandleItemProximitySounds was doing its OWN FindObjectsOfType<
+        // Placeable> EVERY second (~87ms spike per second - a major continuous stutter and the real
+        // cause of "anuncios de item proximo demora muito"). Now both read this cache.
+        private Placeable[] _cachedAllPlaceables = new Placeable[0];
+        private float _lastAllPlaceablesTime = -999f;
+        private const float AllPlaceablesInterval = 15f;
+
+        private void RefreshSeatSceneCache()
+        {
+            // Round 112: rats now come from the game's own live list (SceneReferences.tutorialRats)
+            // - no FindObjectsOfType<TutorialRat> scan, and death/count is instant (the list updates
+            // when a rat is destroyed). See HandleRatAnnouncement.
+            if (Time.unscaledTime - _lastAllPlaceablesTime >= AllPlaceablesInterval)
+            {
+                _lastAllPlaceablesTime = Time.unscaledTime;
+                var swc = Main.DebugMode ? System.Diagnostics.Stopwatch.StartNew() : null;
+                _cachedAllPlaceables = Object.FindObjectsOfType<Placeable>();
+                _cachedCandles = _cachedAllPlaceables
+                    .Where(p => p != null && p.itemSetup != null && p.itemSetup.item != null && p.itemSetup.item.JDJGFAACPFC() == CandleItemId)
+                    .ToArray();
+                if (swc != null && swc.ElapsedMilliseconds > 3) DebugLogger.LogState($"WorldNav: PERF placeable scan took {swc.ElapsedMilliseconds}ms ({_cachedAllPlaceables.Length} placeables, {_cachedCandles.Length} candles)");
+            }
+
+            if (Time.unscaledTime - _lastSeatSceneCacheTime < SeatSceneCacheInterval) return;
+            _lastSeatSceneCacheTime = Time.unscaledTime;
+            var sw = Main.DebugMode ? System.Diagnostics.Stopwatch.StartNew() : null;
+            _cachedSeats = Object.FindObjectsOfType<Seat>();
+            _cachedTables = Object.FindObjectsOfType<Table>();
+            if (sw != null && sw.ElapsedMilliseconds > 3) DebugLogger.LogState($"WorldNav: PERF RefreshSeatSceneCache took {sw.ElapsedMilliseconds}ms ({_cachedSeats.Length} seats, {_cachedTables.Length} tables)");
+        }
+
+        private GameObject _lastNearRat;
+        private Vector3 _lastNearRatPos;
+        private int _lastRatCount = -1;
+        private float _lastRatMoveAnnounceTime;
+        private const float RatMoveAnnounceInterval = 0.6f;
+
+        // Round 108/111/112: rats. Round 112 - read the game's OWN live list
+        // (SceneReferences.tutorialRats), not a FindObjectsOfType scan: it's free to read and the
+        // count is exact/instant (the game removes a rat from it the moment it's destroyed), which
+        // fixes both the lag ("caçar os ratos está com muito lag") and makes the death announce
+        // reliable. Proximity on approach, removal announce when the count drops, and which way the
+        // nearest rat moved (they wander).
+        private readonly System.Collections.Generic.Dictionary<Customer, CustomerState> _customerStates =
+            new System.Collections.Generic.Dictionary<Customer, CustomerState>();
+        private readonly System.Collections.Generic.Dictionary<Customer, bool> _customerServed =
+            new System.Collections.Generic.Dictionary<Customer, bool>();
+        private readonly System.Collections.Generic.HashSet<Customer> _customerOrderAnnounced =
+            new System.Collections.Generic.HashSet<Customer>();
+        private float _lastTavernServiceCheck;
+
+        private static string CustomerWantWord(Customer c)
+        {
+            var reqItem = c.currentRequest?.LHBPOPOIFLE();
+            return reqItem != null && !string.IsNullOrEmpty(reqItem.IABAKHPEOAF()) ? reqItem.IABAKHPEOAF()
+                : (c.preference == CustomerPreference.Drink ? "bebida" : "comida");
+        }
+
+        // Round 118/119: announce the tavern service loop. New customer -> "Cliente chegou"; ready
+        // to serve (OrderInTable) -> "Cliente quer {item}"; served (hasBeenServed) -> "Pedido
+        // servido"; leaving -> "Cliente saiu satisfeito/insatisfeito" (by hasBeenServed). Serving
+        // is manual (item on tray + E next to them) OR remote with the Z/X keys (HandleServeKeys).
+        private bool _tavernServeHooked;
+        private int _lastDirtCount = -1;
+        private int _lastTrayDrinkCount = -1;
+        private int _lastRowdyCount = -1;
+
+        // Round 127: find rowdy customers by MOOD (currentMoodState == Rowdy) across the live
+        // customer list, not just TavernManager.customersRowdy - more robust for V (calm) / Delete
+        // (expel) and the "new rowdy" announcement.
+        private static int CountRowdyCustomers()
+        {
+            var tm = TavernManager.GGFJGHHHEJC;
+            if (tm == null || tm.customers == null) return 0;
+            int n = 0;
+            foreach (var c in tm.customers)
+                if (c != null && (c.currentMoodState == MoodState.Rowdy || c.customerState == CustomerState.BeingANuisance)) n++;
+            return n;
+        }
+
+        private static Customer FindNearestRowdyCustomer()
+        {
+            var tm = TavernManager.GGFJGHHHEJC;
+            if (tm == null || tm.customers == null) return null;
+            Vector3 playerPos = PlayerController.GetPlayerPosition(1);
+            Customer target = null;
+            float best = float.MaxValue;
+            foreach (var c in tm.customers)
+            {
+                if (c == null) continue;
+                if (c.currentMoodState != MoodState.Rowdy && c.customerState != CustomerState.BeingANuisance) continue;
+                float d = Vector3.Distance(playerPos, c.transform.position);
+                if (d < best) { best = d; target = c; }
+            }
+            return target;
+        }
+
+        private void HandleTavernServiceAnnouncements()
+        {
+            // Round 120: hook the game's own serve event (fires synchronously inside every serve -
+            // player E, the Z/X keys, or an employee) so "servido" is RELIABLE. The 0.5s poll on
+            // hasBeenServed missed fast serves (user: served 5, only 2 announced). Subscribed once.
+            if (!_tavernServeHooked)
+            {
+                var cr = CommonReferences.GGFJGHHHEJC;
+                if (cr != null)
+                {
+                    cr.OnAnyCustomerServeItem += (pn, item) =>
+                    {
+                        string n = item?.LHBPOPOIFLE()?.IABAKHPEOAF();
+                        ScreenReader.Say(string.IsNullOrEmpty(n) ? "Pedido servido" : $"{n} servido", interrupt: false);
+                    };
+                    _tavernServeHooked = true;
+                }
+            }
+
+            // Round 124: poll a bit faster (0.25s) so orders are announced sooner.
+            if (Time.unscaledTime - _lastTavernServiceCheck < 0.25f) return;
+            _lastTavernServiceCheck = Time.unscaledTime;
+
+            // Round 122: announce when a NEW floor stain appears (user: "manchas... não foram
+            // anunciadas"). The proximity announcement only fires when you walk up to one.
+            var crRefs = CommonReferences.GGFJGHHHEJC;
+            int dirtCount = crRefs?.tavernFloorDirt != null ? crRefs.tavernFloorDirt.Count : 0;
+            if (_lastDirtCount >= 0 && dirtCount > _lastDirtCount)
+                ScreenReader.Say(dirtCount - _lastDirtCount == 1 ? "Mancha nova no chão" : $"{dirtCount - _lastDirtCount} manchas novas no chão", interrupt: false);
+            _lastDirtCount = dirtCount;
+
+            // Round 123: drinks must be FULLY filled before they land on the tray (currentDrinks) -
+            // the user had no feedback that a cup was complete, so X kept failing with an empty tray
+            // ("serve X - tray=[]"). Announce when a drink reaches the tray so they know it's ready.
+            // Round 127: announce when a new customer turns rowdy so the player knows there's one to
+            // calm (V) or kick out (Delete) - "não atualiza para ver proximos clientes".
+            int rowdyCount = CountRowdyCustomers();
+            if (_lastRowdyCount >= 0 && rowdyCount > _lastRowdyCount)
+                ScreenReader.Say("Cliente ficou bravo, V acalma ou Delete expulsa", interrupt: false);
+            _lastRowdyCount = rowdyCount;
+
+            var trayDrinks = PlayerController.GetPlayer(1)?.trayHandler?.tray?.currentDrinks;
+            int trayCount = trayDrinks != null ? trayDrinks.Count : 0;
+            if (_lastTrayDrinkCount >= 0 && trayCount > _lastTrayDrinkCount && trayDrinks != null && trayDrinks.Count > 0)
+            {
+                string drink = trayDrinks[trayDrinks.Count - 1]?.LHBPOPOIFLE()?.IABAKHPEOAF();
+                ScreenReader.Say(string.IsNullOrEmpty(drink) ? "Bebida pronta na bandeja, aperte X pra servir" : $"{drink} na bandeja, aperte X pra servir", interrupt: false);
+            }
+            _lastTrayDrinkCount = trayCount;
+
+            var tm = TavernManager.GGFJGHHHEJC;
+            var customers = tm != null ? tm.customers : null;
+            if (customers == null) { if (_customerStates.Count > 0) { _customerStates.Clear(); _customerServed.Clear(); } return; }
+
+            var seen = new System.Collections.Generic.HashSet<Customer>();
+            foreach (var c in customers)
+            {
+                if (c == null) continue;
+                seen.Add(c);
+                CustomerState state = c.customerState;
+                bool known = _customerStates.TryGetValue(c, out var prev);
+                if (!known) ScreenReader.Say("Cliente chegou", interrupt: false);
+                _customerStates[c] = state;
+                // Round 124: announce the order as soon as the customer is in a serveable state AND
+                // has an order, tracked per-customer (not tied to the exact state-transition frame) -
+                // the user reported bar orders being "left behind". Re-arms when they leave the
+                // serveable state so a second order announces again.
+                bool serveable = state == CustomerState.OrderInTable || state == CustomerState.WaitingAtBar;
+                if (serveable && c.currentRequest != null)
+                {
+                    if (_customerOrderAnnounced.Add(c))
+                    {
+                        string where = state == CustomerState.WaitingAtBar ? "no balcão" : "na mesa";
+                        ScreenReader.Say($"Cliente {where} quer {CustomerWantWord(c)}. Z comida, X bebida", interrupt: false);
+                    }
+                }
+                else if (!serveable) _customerOrderAnnounced.Remove(c);
+                // Track hasBeenServed for the satisfied/dissatisfied announcement on leave. The
+                // "servido" announcement itself is handled by the OnAnyCustomerServeItem hook above.
+                _customerServed[c] = c.hasBeenServed;
+            }
+
+            // Departures: tell the player whether they left satisfied (served) or not.
+            if (_customerStates.Count > seen.Count)
+            {
+                var gone = new System.Collections.Generic.List<Customer>();
+                foreach (var kv in _customerStates) if (!seen.Contains(kv.Key)) gone.Add(kv.Key);
+                foreach (var g in gone)
+                {
+                    _customerServed.TryGetValue(g, out bool served);
+                    _customerStates.Remove(g);
+                    _customerServed.Remove(g);
+                    _customerOrderAnnounced.Remove(g);
+                    ScreenReader.Say(served ? "Cliente saiu satisfeito" : "Cliente saiu insatisfeito", interrupt: false);
+                }
+            }
+        }
+
+        // Round 119: serve a waiting customer WITHOUT walking to them - Z serves food, X serves
+        // drink ("não ficar indo e vindo"). Finds the nearest customer in OrderInTable with that
+        // preference and calls the game's own ServeCustomer (no distance check of its own - it
+        // serves currentRequest from the player's tray). If the item isn't on the tray it fails.
+        private void HandleServeKeys()
+        {
+            bool z = Input.GetKeyDown(KeyCode.Z);
+            bool x = Input.GetKeyDown(KeyCode.X);
+            if (!z && !x) return;
+            if (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)
+                || Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift)
+                || Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt)) return;
+
+            var tm = TavernManager.GGFJGHHHEJC;
+            if (tm == null || tm.customers == null) { ScreenReader.Say("Nenhum cliente", interrupt: true); return; }
+
+            Vector3 playerPos = PlayerController.GetPlayerPosition(1);
+            Customer target = null;
+            float bestDist = float.MaxValue;
+            int matchCount = 0;
+            foreach (var c in tm.customers)
+            {
+                if (c == null || c.currentRequest == null) continue;
+                if (c.customerState != CustomerState.OrderInTable && c.customerState != CustomerState.WaitingAtBar) continue;
+                // Round 121: classify by the ORDERED ITEM (currentRequest.JEPBBEBJEFI() = is a drink),
+                // not Customer.preference - the user reported Z and X doing the same thing, so the
+                // preference field wasn't reliably food-vs-drink. Z serves food orders, X drink orders.
+                bool isDrink = c.currentRequest.JEPBBEBJEFI();
+                if (z && isDrink) continue;   // Z = food only
+                if (x && !isDrink) continue;   // X = drink only
+                matchCount++;
+                float d = Vector3.Distance(playerPos, c.transform.position);
+                if (d < bestDist) { bestDist = d; target = c; }
+            }
+            if (Main.DebugMode)
+            {
+                if (target == null)
+                {
+                    var sb = new System.Text.StringBuilder();
+                    foreach (var c in tm.customers)
+                    {
+                        if (c == null) continue;
+                        string req = c.currentRequest?.LHBPOPOIFLE()?.IABAKHPEOAF() ?? "null";
+                        string kind = c.currentRequest != null ? (c.currentRequest.JEPBBEBJEFI() ? "bebida" : "comida") : "?";
+                        sb.Append($"[{c.customerState}/{kind}/{req}] ");
+                    }
+                    DebugLogger.LogState($"WorldNav: serve key {(z ? "Z food" : "X drink")} - NO MATCH. customers: {sb}");
+                }
+                else DebugLogger.LogState($"WorldNav: serve key {(z ? "Z food" : "X drink")} pressed - {matchCount} matching, target found");
+            }
+            if (target == null)
+            {
+                // Round 130: the user insists they can serve at the bar with E while Z says nothing.
+                // As a definitive test (and possible fix), try the game's ServeCustomer on the nearest
+                // matching-kind customer in ANY state - ServeCustomer itself decides if the state is
+                // serveable. If it works, we learn which state; if not, the log shows it's truly not
+                // serveable (timing), and we give the informative message.
+                var trayFb = PlayerController.GetPlayer(1)?.trayHandler?.tray;
+                Customer fb = null; float fbDist = float.MaxValue;
+                bool coming = false, done = false;
+                foreach (var c in tm.customers)
+                {
+                    if (c == null || c.currentRequest == null) continue;
+                    if (c.currentRequest.JEPBBEBJEFI() == z) continue; // wrong kind for this key
+                    float d = Vector3.Distance(playerPos, c.transform.position);
+                    if (d < fbDist) { fbDist = d; fb = c; }
+                    if (c.customerState == CustomerState.HeadingToBar || c.customerState == CustomerState.HeadingToSeat) coming = true;
+                    else if (c.customerState == CustomerState.EatingAtTable) done = true;
+                }
+                if (fb != null)
+                {
+                    bool fbServed = fb.ServeCustomer(1, true, trayFb);
+                    if (Main.DebugMode) DebugLogger.LogState($"WorldNav: serve {(z ? "Z" : "X")} FALLBACK try on state={fb.customerState} -> served={fbServed}");
+                    if (fbServed) { return; } // OnAnyCustomerServeItem hook announces it
+                }
+                string what = z ? "comida" : "bebida";
+                if (coming) ScreenReader.Say($"Cliente de {what} ainda chegando, espere ouvir no balcão", interrupt: true);
+                else if (done) ScreenReader.Say($"Clientes de {what} já foram servidos", interrupt: true);
+                else ScreenReader.Say($"Nenhum cliente quer {what}", interrupt: true);
+                return;
+            }
+
+            var tray = PlayerController.GetPlayer(1)?.trayHandler?.tray;
+            string item = CustomerWantWord(target);
+            // Round 122: dump what's actually on the tray + the customer's request, to find why a
+            // drink the user filled won't serve (tray.MHBHHNCFOEG removes the request instance from
+            // currentDrinks - if it's a different instance / non-stackable, it won't match).
+            if (Main.DebugMode)
+            {
+                string trayDrinks = tray?.currentDrinks != null
+                    ? string.Join(", ", System.Linq.Enumerable.Select(tray.currentDrinks, d => d?.LHBPOPOIFLE()?.IABAKHPEOAF() ?? "?"))
+                    : "tray-null";
+                var reqI = target.currentRequest?.LHBPOPOIFLE();
+                DebugLogger.LogState($"WorldNav: serve X - request=\"{(reqI != null ? reqI.IABAKHPEOAF() : "?")}\" reqStackable={(reqI != null ? reqI.canBeStacked.ToString() : "?")} tray=[{trayDrinks}] state={target.customerState}");
+            }
+            bool served = target.ServeCustomer(1, true, tray);
+            if (Main.DebugMode) DebugLogger.LogState($"WorldNav: serve key {(z ? "Z food" : "X drink")} -> served={served} item={item}");
+            if (served)
+            {
+                // The OnAnyCustomerServeItem hook announces "{item} servido" - don't double it here.
+                _customerServed[target] = true;
+            }
+            else
+            {
+                // Round 121: drinks must be on the TRAY - and filling a cup at a dispenser puts it
+                // there automatically (DrinkDispenser.TakeDrink uses trayHandler.tray), so the real
+                // fix is filling the RIGHT drink (each dispenser holds one type, now named). Food can
+                // come from the inventory.
+                bool isDrink = target.currentRequest.JEPBBEBJEFI();
+                ScreenReader.Say(isDrink
+                    ? $"Não consegui servir {item}. Encha {item} no dispensador certo, vai pra bandeja"
+                    : $"Não consegui servir {item}. Precisa ter {item} no inventário ou bandeja", interrupt: true);
+            }
+        }
+
+        // Round 123: V calms the nearest rowdy customer from anywhere ("acalmar clientes"), mirroring
+        // the game's "Calm down" interact (Customer.OBGPLACHKHK(employee), here null = player). It's
+        // probabilistic in-game, so it can fail - announce the outcome. KeyCode.V is unused by the game.
+        private void HandleCalmKey()
+        {
+            if (!Input.GetKeyDown(KeyCode.V)) return;
+            if (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)
+                || Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift)
+                || Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt)) return;
+
+            Customer target = FindNearestRowdyCustomer();
+            if (target == null) { ScreenReader.Say("Nenhum cliente encrenqueiro", interrupt: true); return; }
+
+            // Round 130: use the game's REAL calm method - CalmCustomer(null) (what E calls, line
+            // 873). The objective "Tente acalmar um cliente insatisfeito" tracks this CALL, so my
+            // round-128 direct mood-set (MFOPJDFMJBN) silently broke the objective. CalmCustomer only
+            // works on a Rowdy, not-yet-nuisance customer; it's probabilistic (calm -> Neutral, or
+            // fail -> BecomeNuisance), and in the tutorial it intentionally makes them a nuisance so
+            // you then expel them. Either way the "tried to calm" objective ticks.
+            if (target.customerState == CustomerState.BeingANuisance)
+            {
+                ScreenReader.Say("Esse já está fazendo bagunça, use Delete pra expulsar", interrupt: true);
+                return;
+            }
+            bool handled = target.CalmCustomer(null);
+            if (Main.DebugMode) DebugLogger.LogState($"WorldNav: calm key V -> CalmCustomer handled={handled}, mood={target.currentMoodState}, state={target.customerState}");
+            if (!handled) { ScreenReader.Say("Não deu pra acalmar esse agora", interrupt: true); return; }
+            if (target.currentMoodState == MoodState.Neutral) ScreenReader.Say("Cliente acalmado", interrupt: true);
+            else ScreenReader.Say("Tentou acalmar, mas ficou bravo. Use Delete pra expulsar", interrupt: true);
+        }
+
+        // Round 125: Delete EXPELS (kicks out) the nearest rowdy customer, with the mop in hand
+        // (like the game's mop-hit). Calming (V) and expelling (Delete) are the two responses - the
+        // user keeps both. A customer must be BeingANuisance for MarkAsKicked() to work, so a still-
+        // Rowdy one is pushed to nuisance first via FHPAMNEIJLI(true). KeyCode.Delete is only used by
+        // the game inside inventory drag (MouseSlot), not in the world.
+        private void HandleExpelKey()
+        {
+            if (!Input.GetKeyDown(KeyCode.Delete)) return;
+            if (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)
+                || Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift)) return;
+
+            Item selected = null;
+            try { selected = PlayerInventory.GetPlayer(1)?.actionBarInventory?.GetSelectedItem(); }
+            catch (System.Exception) { }
+            if (!(selected is Mop))
+            {
+                ScreenReader.Say("Segure o esfregão pra expulsar", interrupt: true);
+                return;
+            }
+
+            Customer target = FindNearestRowdyCustomer();
+            if (target == null) { ScreenReader.Say("Nenhum cliente encrenqueiro", interrupt: true); return; }
+
+            // Round 132 fix: the mission's expel objective is tracked by CommonReferences
+            // .OnCustomerIsHit (T112_CalmarCliente subscribes to it), which ONLY fires inside
+            // Customer.KickOut(hitDetection) - NOT KickWithForce/MarkAsKicked. So the previous Delete
+            // expelled the customer but never completed the objective. Proper path: BecomeNuisance(true)
+            // (sets the nuisance flag KickOut requires + fires OnCustomerBecomeNuisance) then
+            // KickOut(player's HitDetection) - which fires OnCustomerIsHit, counts "kickedCustomers",
+            // and flings them out (HandleSendOut -> KickWithForce). Uses the real player HitDetection
+            // (bouncer=false, playerNum=1) so HandleSendOut resolves the force origin.
+            Vector3 playerPos = PlayerController.GetPlayerPosition(1);
+            var hd = PlayerController.GetPlayer(1)?.hitDetection;
+            if (target.customerState != CustomerState.BeingANuisance) target.BecomeNuisance(true);
+            if (hd != null) target.KickOut(hd);
+            else target.KickWithForce(playerPos); // fallback if the player HitDetection isn't available
+            if (Main.DebugMode) DebugLogger.LogState($"WorldNav: expel key Delete -> KickOut(hd={(hd != null)}), state={target.customerState}");
+            ScreenReader.Say("Cliente expulso", interrupt: true);
+        }
+
+        // Round 120: Backspace cleans the nearest floor stain from anywhere, IF the mop is the
+        // selected hotbar item ("uma mancha limpada para cada backspace"). Uses the game's own
+        // FloorDirt.DestroyFloorDirt() (fires OnFloorDirtDestroyed, so the goal still counts), and
+        // the live CommonReferences.tavernFloorDirt list (cheap). KeyCode.Backspace is unused by the
+        // game.
+        private void HandleMopBackspace()
+        {
+            if (!Input.GetKeyDown(KeyCode.Backspace)) return;
+            if (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)
+                || Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift)) return;
+
+            Item selected = null;
+            try { selected = PlayerInventory.GetPlayer(1)?.actionBarInventory?.GetSelectedItem(); }
+            catch (System.Exception) { }
+            if (Main.DebugMode) DebugLogger.LogState($"WorldNav: mop backspace - selected item = \"{(selected != null ? selected.IABAKHPEOAF() : "null")}\" isMop={(selected is Mop)}");
+            if (!(selected is Mop))
+            {
+                ScreenReader.Say("Selecione o esfregão no uso rápido primeiro", interrupt: true);
+                return;
+            }
+
+            Vector3 playerPos = PlayerController.GetPlayerPosition(1);
+
+            // Nearest floor stain (CommonReferences.tavernFloorDirt).
+            var cr = CommonReferences.GGFJGHHHEJC;
+            var dirtList = cr != null ? cr.tavernFloorDirt : null;
+            FloorDirt nearestDirt = null;
+            float dirtDist = float.MaxValue;
+            if (dirtList != null)
+                foreach (var d in dirtList)
+                {
+                    if (d == null) continue;
+                    float dist = Vector3.Distance(playerPos, d.transform.position);
+                    if (dist < dirtDist) { dirtDist = dist; nearestDirt = d; }
+                }
+
+            // Round 124: also clear dirty dishes off seats with Backspace ("limpar mesa... igual as
+            // manchas"). Each Seat has a dirtyDish + Seat.CleanDirtyDish(); use the cached seat list.
+            // Round 126 fix: CleanDirtyDish() only DEACTIVATES the dish GameObject - it never nulls
+            // Seat.dirtyDish. So "dirtyDish != null" stayed true forever (-> "mesa limpa" infinito +
+            // false positives). A seat is actually dirty only when its dish is ACTIVE in the scene.
+            Seat nearestDishSeat = null;
+            float dishDist = float.MaxValue;
+            if (_cachedSeats != null)
+                foreach (var s in _cachedSeats)
+                {
+                    if (s == null || s.dirtyDish == null || !s.dirtyDish.gameObject.activeSelf) continue;
+                    float dist = Vector3.Distance(playerPos, s.transform.position);
+                    if (dist < dishDist) { dishDist = dist; nearestDishSeat = s; }
+                }
+
+            // Round 127: BIG tables hold their dirty dishes in Table.dish[] (NOT Seat.dirtyDish) -
+            // that's why the big table was never cleaned. Scan tables too and clean a single dish by
+            // replicating the game's own clear (SetActive(false) + RemoveFromSurface).
+            Table nearestDishTable = null;
+            DirtyDish nearestTableDish = null;
+            float tableDishDist = float.MaxValue;
+            if (_cachedTables != null)
+                foreach (var t in _cachedTables)
+                {
+                    if (t == null || t.dish == null) continue;
+                    foreach (var dd in t.dish)
+                    {
+                        if (dd == null || !dd.gameObject.activeSelf) continue;
+                        float dist = Vector3.Distance(playerPos, dd.transform.position);
+                        if (dist < tableDishDist) { tableDishDist = dist; nearestTableDish = dd; nearestDishTable = t; }
+                    }
+                }
+
+            // Round 129: the actual "dirty table" the customers complain about is the table's DIRT
+            // LEVEL (Table.JNHCCCBICDM: Messy/Dirty/VeryDirty from accumulated dirtiness), NOT dishes -
+            // the round-128 log proved 0 dirty dishes while the big table was visibly dirty. Clean it
+            // with SetDirtiness(0).
+            Table nearestDirtyTable = null;
+            float dirtyTableDist = float.MaxValue;
+            if (_cachedTables != null)
+                foreach (var t in _cachedTables)
+                {
+                    if (t == null || (int)t.JNHCCCBICDM < (int)TableDirtLevel.Messy) continue;
+                    float dist = Vector3.Distance(playerPos, t.transform.position);
+                    if (dist < dirtyTableDist) { dirtyTableDist = dist; nearestDirtyTable = t; }
+                }
+
+            if (nearestDirt == null && nearestDishSeat == null && nearestTableDish == null && nearestDirtyTable == null)
+            {
+                if (Main.DebugMode)
+                {
+                    int seatsWithDish = 0, tableDishes = 0, dirtyTables = 0;
+                    if (_cachedSeats != null) foreach (var s in _cachedSeats) if (s != null && s.dirtyDish != null && s.dirtyDish.gameObject.activeSelf) seatsWithDish++;
+                    if (_cachedTables != null) foreach (var t in _cachedTables) { if (t == null) continue; if (t.dish != null) foreach (var dd in t.dish) if (dd != null && dd.gameObject.activeSelf) tableDishes++; if ((int)t.JNHCCCBICDM >= (int)TableDirtLevel.Messy) dirtyTables++; }
+                    DebugLogger.LogState($"WorldNav: backspace NADA - {(_cachedSeats?.Length ?? -1)} seats ({seatsWithDish} dirty), {(_cachedTables?.Length ?? -1)} tables ({tableDishes} dishes, {dirtyTables} dirty-level), dirtList={(dirtList?.Count ?? -1)}");
+                }
+                ScreenReader.Say("Nada pra limpar", interrupt: true);
+                return;
+            }
+
+            // Clean whichever of the four is closest.
+            float minDist = Mathf.Min(Mathf.Min(dirtDist, dishDist), Mathf.Min(tableDishDist, dirtyTableDist));
+            if (nearestDirtyTable != null && dirtyTableDist <= minDist)
+            {
+                nearestDirtyTable.SetDirtiness(0f);
+                if (Main.DebugMode) DebugLogger.LogState("WorldNav: mop backspace cleaned a table dirt level");
+                ScreenReader.Say("Mesa limpa", interrupt: true);
+                return;
+            }
+            if (nearestDishSeat != null && dishDist <= minDist)
+            {
+                nearestDishSeat.CleanDirtyDish();
+                if (Main.DebugMode) DebugLogger.LogState("WorldNav: mop backspace cleaned a seat dish");
+                ScreenReader.Say("Mesa limpa", interrupt: true);
+                return;
+            }
+            if (nearestTableDish != null && tableDishDist <= minDist)
+            {
+                nearestTableDish.gameObject.SetActive(false);
+                nearestDishTable.placeable?.placeableSurface?.RemoveFromSurface(nearestTableDish.transform);
+                if (Main.DebugMode) DebugLogger.LogState("WorldNav: mop backspace cleaned a table dish");
+                ScreenReader.Say("Mesa limpa", interrupt: true);
+                return;
+            }
+
+            nearestDirt.DestroyFloorDirt(); // removes itself from tavernFloorDirt
+            int remaining = 0;
+            if (dirtList != null) foreach (var d in dirtList) if (d != null) remaining++;
+            if (Main.DebugMode) DebugLogger.LogState($"WorldNav: mop backspace cleaned a stain, {remaining} remaining");
+            ScreenReader.Say(remaining <= 0 ? "Mancha limpa, todas limpas" : $"Mancha limpa, faltam {remaining}", interrupt: true);
+        }
+
+        private void HandleRatAnnouncement()
+        {
+            var sceneRefs = SceneReferences.GetSceneReferences();
+            var rats = sceneRefs != null ? sceneRefs.tutorialRats : null;
+            Vector3 playerPos = PlayerController.GetPlayerPosition(1);
+            GameObject nearest = null;
+            float nearestDist = float.MaxValue;
+            int count = 0;
+            if (rats != null)
+            {
+                foreach (var rat in rats)
+                {
+                    if (rat == null) continue;
+                    count++;
+                    float dist = Vector3.Distance(playerPos, rat.transform.position);
+                    if (dist <= ItemSoundRadius && dist < nearestDist) { nearest = rat; nearestDist = dist; }
+                }
+            }
+
+            // A rat was removed (count dropped).
+            if (_lastRatCount >= 0 && count < _lastRatCount)
+            {
+                ScreenReader.Say(count == 0 ? "Todos os ratos removidos" : $"Rato removido, faltam {count}", interrupt: false);
+                if (Main.DebugMode) DebugLogger.LogState($"WorldNav: rat removed, {count} remaining");
+            }
+            _lastRatCount = count;
+
+            // Entering range of a (different) rat - proximity + how to deal with it.
+            if (nearest != _lastNearRat)
+            {
+                _lastNearRat = nearest;
+                if (nearest != null)
+                {
+                    _lastNearRatPos = nearest.transform.position;
+                    _lastRatMoveAnnounceTime = Time.unscaledTime;
+                    ScreenReader.Say("Rato perto. Use o esfregão pra removê-lo", interrupt: false);
+                    if (Main.DebugMode) DebugLogger.LogState($"WorldNav: rat proximity at {nearest.transform.position} dist={nearestDist:F1}");
+                }
+                return;
+            }
+            if (nearest == null) return;
+
+            // The nearest rat moved - tell the player which way (throttled, ~1 tile of movement).
+            if (Time.unscaledTime - _lastRatMoveAnnounceTime >= RatMoveAnnounceInterval)
+            {
+                Vector3 cur = nearest.transform.position;
+                Vector3 delta = cur - _lastNearRatPos;
+                if (delta.magnitude >= TileSize)
+                {
+                    ScreenReader.Say($"Rato foi {DirectionWord(delta)}", interrupt: false);
+                    _lastNearRatPos = cur;
+                    _lastRatMoveAnnounceTime = Time.unscaledTime;
+                }
+            }
+        }
+
+        private Placeable _lastNearCandle;
+
+        // Round 102: user asked to be warned when passing a spent candle and told the remaining
+        // amount when passing a still-lit one. The candle is a Crafter (confirmed: Placeable.
+        // CreateRotatedPrefab calls component.SetFuel; Crafter.LCCABPFHCOL exposes the live fuel),
+        // and the game's own "spent" threshold is fuel <= 1 (Crafter.HIEAIMBBKFL line ~238). We
+        // announce spent vs lit on approach; the exact percentage needs the candle's MAX fuel,
+        // which isn't reliably readable from the obfuscated source yet, so the real value is logged
+        // here to build the % next round instead of guessing it.
+        private void HandleCandleAnnouncement()
+        {
+            GameObject heldObject = SelectObject.GetPlayer(1)?.selectedGameObject;
+            Vector3 playerPos = PlayerController.GetPlayerPosition(1);
+            Placeable nearest = null;
+            float nearestDist = float.MaxValue;
+            foreach (var candle in _cachedCandles)
+            {
+                if (candle == null || candle.gameObject == heldObject) continue;
+                float dist = Vector3.Distance(playerPos, candle.transform.position);
+                if (dist <= ItemSoundRadius && dist < nearestDist) { nearest = candle; nearestDist = dist; }
+            }
+
+            if (nearest == _lastNearCandle) return;
+            _lastNearCandle = nearest;
+            if (nearest == null) return;
+
+            var crafter = nearest.GetComponent<Crafter>() ?? nearest.GetComponentInChildren<Crafter>();
+            int fuel = crafter != null ? crafter.LCCABPFHCOL : -1;
+            if (Main.DebugMode) DebugLogger.LogState($"WorldNav: candle proximity \"{nearest.gameObject.name}\" hasCrafter={crafter != null} fuel={fuel}");
+
+            if (crafter != null && fuel <= 1)
+                ScreenReader.Say("Vela apagada, precisa repor", interrupt: false);
+            else
+                ScreenReader.Say("Vela acesa", interrupt: false);
+        }
+
+        private void HandleSeatAnnouncement()
+        {
+            // User's explicit report: a bench kept being announced as "Próximo" even right
+            // after picking it up - it's still a real GameObject in the scene while held (now
+            // following the cursor instead of sitting still), so the scan kept finding it.
+            // Excluding whatever's currently selected/held in decoration mode.
+            GameObject heldObject = SelectObject.GetPlayer(1)?.selectedGameObject;
+
+            Vector3 playerPos = PlayerController.GetPlayerPosition(1);
+            Seat nearest = null;
+            float nearestDist = float.MaxValue;
+            foreach (var seat in _cachedSeats)
+            {
+                if (seat == null) continue;
+                // Bug found by reading log evidence directly: this exclusion never actually
+                // worked (the announcement kept repeating right after grabbing). Root cause -
+                // confirmed in Seat.cs: Seat has its own "public Placeable placeable;" field,
+                // meaning Seat and its Placeable are NOT the same GameObject (same root cause
+                // already found for the missing-from-nav-list bug). Comparing seat.gameObject
+                // directly against selectedGameObject (which IS the Placeable's GameObject)
+                // could never match - comparing through seat.placeable instead.
+                if (seat.placeable != null && seat.placeable.gameObject == heldObject) continue;
+                float dist = Vector3.Distance(playerPos, seat.transform.position);
+                if (dist <= ItemSoundRadius && dist < nearestDist)
+                {
+                    nearest = seat;
+                    nearestDist = dist;
+                }
+            }
+
+            if (nearest == _lastNearSeat) return;
+            _lastNearSeat = nearest;
+            if (nearest == null) return;
+
+            // Tells apart a seat that's actually doing its job (linked to a table, set by
+            // Seat.GetNeighbourTable on placement) from one just sitting somewhere with no
+            // table nearby - canBePlaced alone (no overlap) doesn't guarantee this, confirmed
+            // reading Seat.cs's own table-association logic.
+            string status = nearest.table != null ? "associado a uma mesa" : "sem mesa associada";
+            ScreenReader.Say($"Próximo: Banco {GetSeatNumber(nearest)} ({status})", interrupt: false);
+            if (Main.DebugMode) DebugLogger.LogState($"WorldNav: Seat proximity announcement, table={(nearest.table != null ? nearest.table.gameObject.name : "nenhuma")}");
+        }
+
+        // User's explicit request: the empty seating-group slots themselves (see
+        // GetEmptySeatSlots) weren't announced when walking near one, same gap the seat
+        // announcement above used to have.
+        private Vector3? _lastNearSeatSlot;
+
+        // Round 74: the round-73 timer confirmed GetEmptySeatSlots itself (not just the scene
+        // scan it used to do internally) costs ~25ms per call even in steady state - this
+        // method was calling it EVERY FRAME, unthrottled, unlike every other heavy check in
+        // this file. ~25ms/frame is over a full frame's budget at 60fps, paid every single
+        // frame for an announcement that doesn't need per-frame precision. Same throttle
+        // pattern as everywhere else (item sounds, seat scene cache).
+        private float _lastSeatSlotCheckTime = -999f;
+        private const float SeatSlotCheckInterval = 0.3f;
+
+        private void HandleSeatSlotAnnouncement()
+        {
+            if (Time.unscaledTime - _lastSeatSlotCheckTime < SeatSlotCheckInterval) return;
+            _lastSeatSlotCheckTime = Time.unscaledTime;
+
+            Vector3 playerPos = PlayerController.GetPlayerPosition(1);
+            var getSlotsSw = Main.DebugMode ? System.Diagnostics.Stopwatch.StartNew() : null;
+            var slots = GetEmptySeatSlots(playerPos, ItemSoundRadius, _cachedTables, _cachedSeats);
+            if (getSlotsSw != null && getSlotsSw.ElapsedMilliseconds > 3) DebugLogger.LogState($"WorldNav: PERF GetEmptySeatSlots took {getSlotsSw.ElapsedMilliseconds}ms ({slots.Count} slots)");
+
+            Vector3? nearest = null;
+            string nearestLabel = null;
+            int nearestNumber = 0;
+            float nearestDist = float.MaxValue;
+            foreach (var slot in slots)
+            {
+                float dist = Vector3.Distance(playerPos, slot.pos);
+                if (dist < nearestDist) { nearest = slot.pos; nearestLabel = slot.tableLabel; nearestNumber = slot.slotNumber; nearestDist = dist; }
+            }
+
+            bool same = nearest.HasValue && _lastNearSeatSlot.HasValue && Vector3.Distance(nearest.Value, _lastNearSeatSlot.Value) < 0.01f;
+            if (same || (!nearest.HasValue && !_lastNearSeatSlot.HasValue)) return;
+            _lastNearSeatSlot = nearest;
+            if (!nearest.HasValue) return;
+
+            // User's explicit request: identify WHICH slot and WHICH table, not just "a slot
+            // exists somewhere nearby".
+            ScreenReader.Say($"Próximo: Lugar pra banco {nearestNumber} junto da {nearestLabel}", interrupt: false);
+            if (Main.DebugMode) DebugLogger.LogState($"WorldNav: Empty seat slot proximity announcement at {nearest.Value}");
+        }
+
         private void HandleZoneAnnouncement()
         {
             var player = PlayerController.GetPlayer(1);
@@ -1339,6 +3212,43 @@ namespace TravellersRestAccess
             string name = LocationNames.TryGetValue(current, out var known) ? known : current.ToString();
             ScreenReader.Say($"Área: {name}", interrupt: false);
             DebugLogger.LogState($"WorldNav: Location changed to {current} ({name})");
+        }
+
+        private ZoneType _lastZoneType = (ZoneType)(-1);
+        private float _lastZoneTypeCheckTime;
+
+        // Round 112: user asked to be told when entering the kitchen / bedroom / dining room /
+        // cellar / corridor. Those are room-level ZoneTypes (WorldGrid.AGKGGAFFFGM at the player's
+        // position), distinct from the building-level Location handled above. Announced on change.
+        private void HandleZoneTypeAnnouncement()
+        {
+            if (Time.unscaledTime - _lastZoneTypeCheckTime < 0.3f) return;
+            _lastZoneTypeCheckTime = Time.unscaledTime;
+            ZoneType zone = WorldGrid.AGKGGAFFFGM(PlayerController.GetPlayerPosition(1));
+            if (zone == _lastZoneType) return;
+            _lastZoneType = zone;
+            string name = ZoneTypeName(zone);
+            if (Main.DebugMode) DebugLogger.LogState($"WorldNav: zone changed to {zone} ({name ?? "(silent)"})");
+            if (name != null) ScreenReader.Say(name, interrupt: false);
+        }
+
+        private static string ZoneTypeName(ZoneType zone)
+        {
+            switch (zone)
+            {
+                case ZoneType.DiningRoom: return "Sala de jantar";
+                case ZoneType.CraftingRoom: return "Cozinha";
+                case ZoneType.Cellar: return "Adega";
+                case ZoneType.RentedRoom:
+                case ZoneType.RoomPlayer2:
+                case ZoneType.RoomPlayer3:
+                case ZoneType.RoomPlayer4: return "Quarto";
+                case ZoneType.WoodWorkshop: return "Oficina de madeira";
+                case ZoneType.MetalWorkshop: return "Oficina de metal";
+                case ZoneType.StoneWorkshop: return "Oficina de pedra";
+                case ZoneType.WithoutZone: return "Corredor";
+                default: return null; // None / unmapped - stay silent
+            }
         }
 
         private void HandleSimulatedClick()
@@ -1426,6 +3336,34 @@ namespace TravellersRestAccess
             return closest;
         }
 
+        // Round 119: the closest AVAILABLE NPC (customer / cat), if any. NPCs take priority for the
+        // interaction NAME - the game can focus a nearby station (e.g. the beer tap "Grifo") while
+        // the prompt actually shown is the cat's "Conversar", so the name read as the tap. Confirmed
+        // in the log: near the cat, the interaction target resolved to "663 - Grifo".
+        private static GameObject FindClosestAvailableNpc()
+        {
+            Vector3 playerPos = PlayerController.GetPlayerPosition(1);
+            GameObject closest = null;
+            float closestDist = float.MaxValue;
+            foreach (var behaviour in Object.FindObjectsOfType<MonoBehaviour>())
+            {
+                // Round 131: ONLY the dialogue NPCs (cat, Mai) - they are the case where the game
+                // focuses a nearby station instead of the NPC. Customers must NOT be included here:
+                // doing so made a station's "Abrir" prompt get named after a nearby customer
+                // ("Cliente, quer Espetinho: Abrir"). Customers already resolve correctly via the
+                // focused element.
+                if (!(behaviour is CatNPC) && !(behaviour is MaiNPC)) continue;
+                if (!(behaviour is IProximity proximity)) continue;
+                bool available;
+                try { available = proximity.IsAvailableByProximity(1); }
+                catch (System.Exception) { continue; }
+                if (!available) continue;
+                float distance = Vector3.Distance(playerPos, behaviour.transform.position);
+                if (distance < closestDist) { closestDist = distance; closest = behaviour.gameObject; }
+            }
+            return closest;
+        }
+
         /// <summary>
         /// Best-effort name for whatever the player is currently positioned to interact
         /// with - used by DialogueAnnouncer to prefix the spoken action prompt (e.g. "Porta:
@@ -1437,6 +3375,37 @@ namespace TravellersRestAccess
         /// </summary>
         public static string GetNearestInteractionName() => GetNearestInteractionTarget()?.name;
 
+        // Round 118: a customer or the cat. A customer reads as "Cliente, quer {item}" (or food/
+        // drink if the specific item isn't resolvable) so the player knows what to serve;
+        // CustomerBase.currentRequest is the ordered ItemInstance, Customer.preference is Food/Drink.
+        private static string DescribeNpc(GameObject go)
+        {
+            var customer = go.GetComponent<Customer>() ?? go.GetComponentInParent<Customer>();
+            if (customer != null)
+            {
+                // Round 127: only say "quer {item}" when the customer is actually waiting to be
+                // served (OrderInTable/WaitingAtBar) - the user pressed Z near customers the proximity
+                // called "quer comida" but who were already EatingAtTable (served), so Z found nothing
+                // and it felt inconsistent. Reflect the real state instead.
+                bool serveable = customer.customerState == CustomerState.OrderInTable
+                    || customer.customerState == CustomerState.WaitingAtBar;
+                if (serveable && customer.currentRequest != null)
+                {
+                    var reqItem = customer.currentRequest.LHBPOPOIFLE();
+                    string itemName = reqItem != null ? reqItem.IABAKHPEOAF() : null;
+                    if (!string.IsNullOrEmpty(itemName)) return $"Cliente, quer {itemName}";
+                    return customer.preference == CustomerPreference.Drink ? "Cliente, quer bebida" : "Cliente, quer comida";
+                }
+                if (customer.customerState == CustomerState.EatingAtTable) return "Cliente comendo";
+                return "Cliente";
+            }
+            if (go.GetComponent<CatNPC>() != null || go.GetComponentInParent<CatNPC>() != null) return "Gato";
+            // Round 120: the "gata" the user reported is actually Mai (MaiNPC, a DialogueNPCBase) -
+            // the log showed go="MaiNPC" falling through to the nearby bar's name. Name her "Mai".
+            if (go.GetComponent<MaiNPC>() != null || go.GetComponentInParent<MaiNPC>() != null) return "Mai";
+            return null;
+        }
+
         /// <summary>
         /// Same resolution as GetNearestInteractionName, but also returns the world
         /// position (needed to work out the item's direction relative to the player for the
@@ -1446,7 +3415,13 @@ namespace TravellersRestAccess
         /// </summary>
         public static (string name, Vector3 position)? GetNearestInteractionTarget()
         {
-            GameObject go = InteractObject.BBJCJFJEFKK(1)?.GetCurrentInteractGO();
+            // Round 117: prefer the object the prompt is ACTUALLY for (the focused proximity input
+            // element's mainGameObject) over the geometrically-closest IProximity. The user hit
+            // exactly this bug: near the cat (a "Conversar" prompt) it named the closest object - a
+            // drinks dispenser - so the cat read as "Dispensador de bebidas", and the menu table did
+            // the same. The focused element is the real prompt target.
+            GameObject go = InputByProximityManager.GetPlayer(1)?.GetCurrentFocusedInputElement()?.mainGameObject;
+            if (go == null) go = InteractObject.BBJCJFJEFKK(1)?.GetCurrentInteractGO();
             if (go == null)
             {
                 var behaviour = FindClosestAvailableByProximity();
@@ -1454,8 +3429,20 @@ namespace TravellersRestAccess
                 go = behaviour.gameObject;
             }
 
-            var placeable = go.GetComponent<Placeable>() ?? go.GetComponentInParent<Placeable>();
-            string name = placeable != null ? DescribePlaceable(placeable) : go.name;
+            // Round 118: NPCs (customers, the cat) read as their raw GameObject name
+            // ("HumanMaiCustomer (2)") - name them properly, and for a customer say WHAT they want
+            // (the order item + food/drink) so the player knows what to serve.
+            string npcName = DescribeNpc(go);
+            // Round 119: NPCs win the NAME over a nearby station the game happened to focus (the cat
+            // near the tap). If the focused object isn't an NPC but an available one is nearby, use it.
+            if (npcName == null)
+            {
+                var npcGo = FindClosestAvailableNpc();
+                if (npcGo != null) { go = npcGo; npcName = DescribeNpc(go); }
+            }
+            var placeable = npcName == null ? (go.GetComponent<Placeable>() ?? go.GetComponentInParent<Placeable>()) : null;
+            string name = npcName ?? (placeable != null ? DescribePlaceable(placeable) : go.name);
+            if (Main.DebugMode) DebugLogger.LogState($"WorldNav: interaction target go=\"{go.name}\" npc={(npcName != null)} placeable=\"{(placeable != null ? placeable.gameObject.name : "null")}\" -> name=\"{name}\"");
             return (name, go.transform.position);
         }
 

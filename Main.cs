@@ -46,6 +46,8 @@ namespace TravellersRestAccess
         private KeyboardUINavigator _keyboardNavigator;
         private DialogueAnnouncer _dialogueAnnouncer;
         private WorldNavigationHandler _worldNavigationHandler;
+        private InventoryTransferHandler _inventoryTransferHandler;
+        private DecorationModeHandler _decorationModeHandler;
 
         // "Carregando jogo..." kept getting cut off almost immediately by
         // DialogueAnnouncer announcing the loading screen's tip text (confirmed: MainUI
@@ -76,6 +78,8 @@ namespace TravellersRestAccess
             _keyboardNavigator = new KeyboardUINavigator();
             _dialogueAnnouncer = new DialogueAnnouncer();
             _worldNavigationHandler = new WorldNavigationHandler();
+            _inventoryTransferHandler = new InventoryTransferHandler();
+            _decorationModeHandler = new DecorationModeHandler();
         }
 
         private IEnumerator AnnounceStartupDelayed()
@@ -126,6 +130,8 @@ namespace TravellersRestAccess
                     SpaceClosePatch.Apply(_harmony);
                     TutorialTracePatch.Apply(_harmony);
                     MovementAxisPatch.Apply(_harmony);
+                    HotbarSwapPatch.Apply(_harmony);
+                    CleaningDebugPatch.Apply(_harmony);
                     // User's explicit request 2026-06-19: arrow keys should never move the
                     // character, even outside menus (Up/Down stay free for re-reading
                     // dialogue - that's handled separately in DialogueAnnouncer, unaffected
@@ -202,6 +208,13 @@ namespace TravellersRestAccess
 
             _keyboardNavigator.Update();
             _worldNavigationHandler.Update(anyUiOpen);
+            // Hooked unconditionally (not just while a UI is open): the user's explicit
+            // request to announce which hotbar item got selected happens while walking
+            // around the world (plain 1-8, the game's own native control), not in a menu.
+            _inventoryTransferHandler.EnsureHotbarSelectionAnnouncer();
+            CleaningDebugPatch.PollFocus();
+            _decorationModeHandler.Update();
+            if (anyUiOpen) _inventoryTransferHandler.Update(_keyboardNavigator.GetCurrentSelectedGameObject());
 
             if (_dialogueAnnouncerSuppressFrames > 0)
             {

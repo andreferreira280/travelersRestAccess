@@ -22,11 +22,35 @@ namespace TravellersRestAccess
         {
             var target = AccessTools.Method(typeof(NewTutorialManager), "ShowPopUp", new[] { typeof(string) });
             harmony.Patch(target, postfix: new HarmonyMethod(typeof(TutorialTracePatch), nameof(Postfix)));
+
+            // User's explicit request: cleaning the table updated the tutorial's objective
+            // checklist (the checkmark icon toggles via ObjectiveCompleted -> UpdateObjectives,
+            // confirmed in decompiled source) but nothing was announced - the objective text
+            // itself (objectives[i].textMesh) doesn't change when only the checkmark icon
+            // flips, so DialogueAnnouncer's generic "new/changed text" scan never re-fires for
+            // it. The game's own completion sound also goes through MultiAudioManager, already
+            // confirmed unreliable/silent for us (see WorldNavigationHandler's footstep note) -
+            // using our own CustomSounds clip instead, same pattern as everywhere else.
+            var objectiveTarget = AccessTools.Method(typeof(NewTutorialManager), "ObjectiveCompleted");
+            harmony.Patch(objectiveTarget, postfix: new HarmonyMethod(typeof(TutorialTracePatch), nameof(ObjectiveCompletedPostfix)));
         }
 
         public static void Postfix(string CAEDMEDBEGI)
         {
             DebugLogger.LogState($"Tutorial popup shown: \"{CAEDMEDBEGI}\"");
+        }
+
+        public static void ObjectiveCompletedPostfix(NewTutorialManager __instance, int __0)
+        {
+            string text = null;
+            if (__instance.objectives != null && __0 >= 0 && __0 < __instance.objectives.Length)
+            {
+                text = UITextExtractor.GetReadableText(__instance.objectives[__0]?.textMesh);
+            }
+
+            ScreenReader.Say(string.IsNullOrEmpty(text) ? "Objetivo concluído" : $"Objetivo concluído: {text}", interrupt: false);
+            CustomSounds.PlayObjectiveCompleted();
+            DebugLogger.LogState($"Tutorial objective completed (index {__0}): \"{text}\"");
         }
     }
 }
