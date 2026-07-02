@@ -1,0 +1,53 @@
+SONS DO MOD - TravellersRestAccess
+====================================
+
+ONDE COLOCAR:
+Os arquivos .wav vão NA MESMA PASTA da DLL do mod, ou seja:
+  C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\Mods\
+(a mesma pasta onde já estão parede.wav, itens.wav, etc.)
+
+FORMATO: .wav (o mod carrega WAV). Curtos (~0,3 a 1s pros toques de ação).
+Se o arquivo não existir, o mod simplesmente fica em silêncio naquele evento
+(não quebra nada). Então pode ir adicionando aos poucos.
+
+====================================================================
+JÁ EXISTEM (não precisa mexer - só listando pra referência)
+====================================================================
+parede.wav          - som de parede (direcional)
+itens.wav           - som genérico de item por perto
+stand.wav           - mudança de direção
+baixo/cima/esquerda/direita.wav - paredes por direção
+batendo em item.wav - bater em obstáculo (não-parede)
+limpou.wav          - algo limpo / objetivo concluído
+baú/cama/mesa/torneira.wav - itens específicos por perto
+porta/poço/madeira/metal/pedra.wav - sons de zona/aproximação
+
+====================================================================
+NOVOS - SOM POR FERRAMENTA (ao usar a ferramenta com sucesso)
+====================================================================
+cavar.wav      - PÁ (cavar terra/grama)
+arar.wav       - ENXADA (arar a terra)
+plantar.wav    - SEMENTE (plantar)
+regar.wav      - REGADOR (regar) [o do jogo estava saindo errado; este é nosso]
+foice.wav      - FOICE (cortar mato/erva alta)
+machado.wav    - MACHADO (cortar árvore)
+picareta.wav   - PICARETA (minerar pedra/carvão)
+
+====================================================================
+NOVOS - SOM POR ESTAÇÃO DE TRABALHO / ÁRVORE
+(ainda vou ligar esses no código na próxima rodada - já pode ir gravando)
+====================================================================
+estacao_madeira.wav - estação de trabalho de MADEIRA (ex.: serraria)
+estacao_pedra.wav   - estação de trabalho de PEDRA
+estacao_metal.wav   - estação de trabalho de METAL (ferreiro)
+forno.wav           - FORNO (cozinha)
+malte.wav           - MÁQUINA DE MALTE
+arvore.wav          - ao chegar perto de uma ÁRVORE
+
+====================================================================
+OBSERVAÇÃO
+====================================================================
+- O "som de mesa" (mesa.wav) é só pra mesa dentro da taverna; as estações de
+  trabalho vão usar os sons "estacao_*" acima, quando eu ligar no código.
+- Se quiser um som diferente pra "carvão" vs "pedra" na aproximação, me diga que
+  eu adiciono (hoje ambos usam o som genérico de item).

@@ -90,6 +90,14 @@
     </Reference>
   </ItemGroup>
 
+  <!-- Sirenix / OdinSerializer (TravelZonesManager extends SerializedMonoBehaviour) -->
+  <ItemGroup>
+    <Reference Include="Sirenix.Serialization">
+      <HintPath>C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\TravellersRest_Data\Managed\Sirenix.Serialization.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
   <!-- Game assembly -->
   <ItemGroup>
     <Reference Include="Assembly-CSharp">
@@ -105,7 +113,7 @@
   <!-- After build: copy DLL (and custom sound files, loaded next to it at runtime) to the game's Mods folder -->
   <Target Name="CopyToMods" AfterTargets="Build">
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\Mods\" />
-    <Copy SourceFiles="parede.wav;itens.wav;stand.wav;baixo.wav;cima.wav;esquerda.wav;direita.wav;baú.wav;cama.wav;mesa.wav;torneira.wav;batendo em item.wav;limpou.wav" DestinationFolder="C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\Mods\" ContinueOnError="WarnAndContinue" />
+    <Copy SourceFiles="parede.wav;itens.wav;stand.wav;baixo.wav;cima.wav;esquerda.wav;direita.wav;baú.wav;cama.wav;mesa.wav;torneira.wav;batendo em item.wav;limpou.wav;porta.wav;poço.wav;madeira.wav;metal.wav;pedra.wav" DestinationFolder="C:\Users\andre\Downloads\Travellers Rest (Early Access)\Travellers Rest\Windows\Mods\" ContinueOnError="WarnAndContinue" />
     <Message Text="Copied $(TargetFileName) and sound files to Mods folder" Importance="High" />
   </Target>
 

@@ -96,3 +96,58 @@ preparação) -> "Máquinas" (CategorizePlaceable + scan próprio da prep table)
 `GetEmptySeatSlots` apareceu no log custando 15-20ms a cada ~1.3s ("PERF
 GetEmptySeatSlots took 15ms") perto do forno - fonte real de micro-travada.
 Vale revisar (talvez throttle maior ou cache) quando mexer em lag.
+
+## PESQUISA: navegar grids do forno (modificador + quantidade) — rodada 134S
+
+Pedido do usuário: poder alterar a QUANTIDADE e os INGREDIENTES (modificadores)
+de uma receita pelo teclado. Afeta TODAS as receitas. Bloqueia o tutorial do
+bife grelhado (precisa colocar carne bovina no modificador e/ou reduzir o lote
+de 20 pra 4).
+
+### Raiz do problema (confirmado por log + decompiled)
+- O KeyboardUINavigator só varre `Selectable` (KeyboardUINavigator.cs ~linha 762:
+  `root.GetComponentsInChildren<Selectable>()`). Os itens dos GRIDS do forno são
+  `SlotUI` (UIBehaviour), NÃO `Selectable` -> nunca entram na lista navegável.
+- Confirmado no log: no painel de modificadores os únicos itens navegáveis são
+  Output, Name (InputField), Mod1, AcceptButton, CancelButton. A grade de carnes
+  NÃO aparece.
+- "Mod1" e "Output" SÃO navegáveis (têm Selectable), mas dar clique neles
+  (pointerDown+Up+click, já implementado no Activate) NÃO resolve: a seleção do
+  modificador vem de clicar uma carne na GRADE, e a quantidade muda por outro
+  mecanismo.
+
+### Arquitetura (decompiled)
+- `ModifierUI : Container` — slots privados `outputSlotUI`, `input1UI/2/3` (SlotUI),
+  `modiferRequirementsArray` (ModiferRequirement[]). Instâncias: `ModifierUI.instances[3]`.
+- Escolha de item de modificador passa por `ChooseSlotUI` / `ChooseItemUI` — ambos
+  fazem `obj.OnOptionSlotClicked += IMAOMELGPHH` (ChooseItemUI.cs:412, ChooseSlotUI.cs:1194).
+  Ou seja: clicar um SlotUIRecipe de opção dispara `OnOptionSlotClicked(int, Slot, int)`.
+- `SlotUIRecipe : SlotUI` tem `public Action<int, Slot, int> OnOptionSlotClicked`.
+- `SlotUI : UIBehaviour, ISubmitHandler, IPointerDownHandler, IPointerUpHandler, ...`
+  (NÃO IPointerClickHandler). Clique real = pointerDown + pointerUp.
+- Quantidade: `Recipe.output` (ItemAmount) e `craftingList[i].output.amount`;
+  no slot é `IHENCGDNPBL.Stack` / método `OCJOJKJPDNO(amount)` (GameCraftingUI.cs
+  116,273). Setter por input do usuário (scroll/drag/botão) ainda NÃO confirmado.
+- `Recipe.ingredientsNeeded[]` (RecipeIngredient: item, amount, mod).
+- Contagem no inventário: `CraftingInventory.KCCBHHEGEHG(1, item)` (já usado no
+  leitor de ingredientes do KeyboardUINavigator.DescribeRecipeIngredients).
+
+### Plano de implementação (próxima passada focada)
+1. NavItem: adicionar `public GameObject SlotObject;` (Anchor fica null nesses).
+2. No scan, QUANDO o forno/modificador está aberto, achar os SlotUI dos grids
+   (ModifierUI.input slots + a grade de opções/ChooseSlotUI) e adicioná-los como
+   NavItem (SlotObject). Escopo restrito ao crafting pra não afetar outros menus.
+3. Guardar TODAS as ~8 referências a `.Anchor` contra null (GetCurrentSelectedGameObject
+   linha 152; preservação 229/389/394/396/398; Activate 462; AnnounceCurrent 1337).
+4. AnnounceCurrent(SlotObject): ler nome do item + Stack do slot.
+5. Activate(SlotObject): pointerDown+Up+click (já temos o helper).
+6. Quantidade: descobrir o setter (testar se pointerDown+Up no Output muda; se não,
+   procurar IScrollHandler/botões +/-; pior caso, modo "Enter -> digitar número"
+   chamando o setter de Stack/amount).
+7. RISCO: mudança no núcleo do navegador (usado por todos os menus). Fazer aditivo,
+   escopado ao crafting, com guardas de null, e build/teste cuidadoso.
+
+### Pendentes relacionados
+- [185] ler "Vender: X" (valor de venda) no forno.
+- [186] digitar quantidade direto.
+- [59] ESC não fecha o forno enquanto a fala da Mai está aberta.

@@ -36,6 +36,13 @@ namespace TravellersRestAccess
     {
         private const float StabilizeDelay = 0.4f;
 
+        // [57] The text scan does a full-scene FindObjectsOfType<TMP_Text>() - running it EVERY
+        // frame (60x/s) was a constant stutter that delayed the "Próximo:" prompt while walking
+        // ("o aviso ainda demora"). Throttle to 10x/s: imperceptible for an announcement, ~6x
+        // less scanning. Input (Up/Down/Space) still runs per-frame outside this.
+        private const float TextScanInterval = 0.1f;
+        private float _lastTextScanTime;
+
         // Known HUD noise picked up by the global scan, confirmed via live log:
         // in-game clock ("06:05"), day counter ("Seg. 1"), action-bar prompts ("[E] ...").
         private static readonly Regex ClockPattern = new Regex(@"^\d{1,2}:\d{2}$");
@@ -75,6 +82,11 @@ namespace TravellersRestAccess
         private bool _loadingBarSeen;
         private HashSet<string> _activeActionPrompts = new HashSet<string>();
 
+        // True only while the PLAYER is in a dialogue (Continue Button or Response Menu
+        // showing) - NOT for ambient NPC-to-NPC conversations around town. Read by
+        // CustomSounds to mute/resume our sounds, and below to suppress ambient subtitles.
+        public static bool PlayerDialogueActive { get; private set; }
+
         // Dialogue response choices ("Response Menu Panel") - confirmed live this is a
         // SEPARATE thing from the linear Continue Button: the user got stuck for several
         // minutes on a conversation with a real choice ("Eu não sou um saqueador...") because
@@ -98,9 +110,19 @@ namespace TravellersRestAccess
             // scan was picking up the panel's own placeholder body text (e.g. "Sem receitas
             // ainda") and overwriting _lastStoryMessage with it, which is why Up stopped
             // re-reading the real last story/objective line after opening a MainPanelUI tab.
-            if (anyUiOpen) return;
+            if (anyUiOpen) { PlayerDialogueActive = false; return; }
 
             ScanResponseButtons();
+
+            // The PLAYER's conversation is the only one that shows a Continue Button or a
+            // Response Menu for the player to act on. Ambient NPC-to-NPC city conversations
+            // (which DO keep DialogueManager.isConversationActive true and DO render subtitle
+            // text) never show these player controls. So this is the reliable "the player is
+            // actually in a dialogue" signal - used to mute our sounds (and resume after) and
+            // to suppress ambient subtitle narration, neither of which should react to NPCs
+            // chatting among themselves around town.
+            PlayerDialogueActive = _responseButtons.Count > 0 || IsContinueButtonShowing();
+
             if (_responseButtons.Count > 0)
             {
                 // A real dialogue choice is on screen - takes over Up/Down/Space entirely
@@ -189,13 +211,16 @@ namespace TravellersRestAccess
                 return;
             }
 
-            // Same reasoning as the Continue Button: Enter is unreliable here (used by the
-            // game elsewhere), Space is free and already the established way to confirm.
-            if (Input.GetKeyDown(KeyCode.Space))
+            // Confirm with Space OR Enter. User pressed Enter on an NPC's choice menu and
+            // nothing happened ("enter no menu com o npc não funcionou") - the response menu
+            // fully captures input here (we invoke the chosen button's onClick ourselves), so
+            // there's no game handler to race; Enter is safe in THIS modal even though it's
+            // avoided for free-roam dialogue advancing.
+            if (Input.GetKeyDown(KeyCode.Space) || Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
             {
                 Button chosen = _responseButtons[_responseIndex];
                 UISound.PlayChoiceConfirm();
-                DebugLogger.LogInput("Space", $"Choose dialogue response: {UITextExtractor.GetReadableText(chosen.gameObject)}");
+                DebugLogger.LogInput("Confirm", $"Choose dialogue response: {UITextExtractor.GetReadableText(chosen.gameObject)}");
                 chosen.onClick.Invoke();
                 _responseButtons.Clear();
                 _responseIndex = 0;
@@ -204,6 +229,9 @@ namespace TravellersRestAccess
 
         private void ScanAndAnnounceText()
         {
+            if (Time.unscaledTime - _lastTextScanTime < TextScanInterval) return;
+            _lastTextScanTime = Time.unscaledTime;
+
             // Widened from TextMeshProUGUI to TMP_Text (the common base, also covers
             // world-space TextMeshPro) - user reported a message appearing after clicking a
             // table to clean it that's never read; a floating world-space feedback popup
@@ -239,6 +267,13 @@ namespace TravellersRestAccess
                     if (!_activeActionPrompts.Contains(clean))
                     {
                         string stripped = ActionPromptPattern.Replace(clean, "").Trim();
+                        // [143] Farming verbs (Plantar/Cavar/Arar/Regar/Colher/Remover) are now handled
+                        // entirely by the direction-aware front-tile system (WorldNavigationHandler:
+                        // "grama, dá pra cavar" + F feedback). Announcing the game's own "[E] Cavar" /
+                        // "Remover" / nearby "Fundição" prompts on top was pure noise while farming
+                        // (user: "diz remover, fundição e afins quando cavo"). Suppress them here.
+                        if (IsFarmingVerb(stripped)) continue;
+
                         string key = ActionPromptKeyPattern.Match(clean) is { Success: true } keyMatch ? keyMatch.Groups[1].Value.ToUpperInvariant() : null;
                         // Best-effort - user asked for the object's name, not just the verb
                         // ("Abrir" alone doesn't say if it's a door, chest, etc.). Approximate
@@ -266,6 +301,16 @@ namespace TravellersRestAccess
                 // did nothing, the family kept getting announced just like everything else.
                 // Restoring the skip here, now scoped to just that family.
                 if (IsAmbientNpcBark(path)) continue;
+
+                // REVERTED the "suppress subtitle when !PlayerDialogueActive" filter: it also
+                // killed legitimate PLAYER dialogue that auto-advances without a Continue
+                // Button (Mai's post-oven tutorial lines, the city plaque) - confirmed by user
+                // "o diálogo da Mai não está passando". The continue-button signal is NOT a
+                // reliable ambient/player discriminator. Logging the path of dialogue-panel
+                // text here (debug only) to capture the EXACT ambient vs player panel names so
+                // the next round can filter ambient precisely without hitting real dialogue.
+                if (Main.DebugMode && (path.Contains("Subtitle") || path.Contains("Dialogue Panel")))
+                    DebugLogger.LogState($"DialogueText path=\"{path}\" playerDlg={PlayerDialogueActive} text=\"{(clean.Length > 40 ? clean.Substring(0, 40) : clean)}\"");
 
                 _lastAnnounced.TryGetValue(id, out var alreadyAnnounced);
                 if (clean == alreadyAnnounced) continue;
@@ -347,41 +392,41 @@ namespace TravellersRestAccess
                 return;
             }
 
-            // Enter is already used by the game elsewhere (confirmed in game-api.md), which
-            // made it unreliable for advancing here - Space is free and tested working.
-            if (Input.GetKeyDown(KeyCode.Space))
+            // Advance the dialogue with Space OR Enter. REVERSED the old "sound only" approach:
+            // confirmed in the user's log that the game does NOT auto-advance some tutorial
+            // dialogues (Mai's post-oven lines stayed frozen on "Como pode ver, agora você tem
+            // a receita" through 5+ Space presses) - the player was hard-stuck. So we now
+            // INVOKE the Continue Button's onClick ourselves. onClick.Invoke fires the listener
+            // regardless of the button's `interactable` flag (which PixelCrushers keeps off),
+            // so it works where a simulated pointer-click wouldn't.
+            if (Input.GetKeyDown(KeyCode.Space) || Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
             {
-                // Root cause found by reading the user's own Latest.log across several
-                // sessions: requiring `.interactable` here meant this NEVER matched, not
-                // once, in any session, even though dialogue visibly advanced one line per
-                // Space press the whole time - the game advances it natively by itself,
-                // bypassing this Button's onClick entirely (it's seemingly never
-                // `interactable`, by design, regardless of mode). So we no longer try to
-                // invoke it ourselves (that risked double-advancing, racing the game's own
-                // handler) - just detect it's showing (`activeInHierarchy` only) to play the
-                // confirm sound alongside whatever the game itself is about to do.
-                if (IsContinueButtonShowing())
+                var cont = GetContinueButton();
+                if (cont != null)
                 {
                     UISound.PlayChoiceConfirm();
-                    DebugLogger.LogInput("Space", "Advance dialogue (sound only - game handles the actual advance)");
+                    cont.onClick.Invoke();
+                    DebugLogger.LogInput("Advance", "Invoked Continue Button onClick");
                 }
                 else if (Main.DebugMode)
                 {
-                    DebugLogger.LogState("Space pressed but no Continue Button showing");
+                    DebugLogger.LogState("Advance pressed but no Continue Button showing");
                 }
             }
         }
 
-        private static bool IsContinueButtonShowing()
+        private static bool IsContinueButtonShowing() => GetContinueButton() != null;
+
+        private static Button GetContinueButton()
         {
             foreach (var button in Object.FindObjectsOfType<Button>())
             {
                 if (button.gameObject.name == "Continue Button" && button.gameObject.activeInHierarchy)
                 {
-                    return true;
+                    return button;
                 }
             }
-            return false;
+            return null;
         }
 
         private static bool IsKnownHudNoise(string clean)
@@ -416,14 +461,23 @@ namespace TravellersRestAccess
         // either, so a blanket mute isn't earning its keep - keep other NPC barks audible.
         private static readonly string[] FilteredAmbientNpcNames = { "BuzzNPC", "DoorNPC", "Mudanza" };
 
+        // Farming actions whose prompt names the GROUND state, not a nearby placed object.
+        private static bool IsFarmingVerb(string verb)
+        {
+            if (string.IsNullOrEmpty(verb)) return false;
+            string v = verb.ToLowerInvariant();
+            return v.Contains("plantar") || v.Contains("cavar") || v.Contains("regar")
+                || v.Contains("arar") || v.Contains("colher") || v.Contains("remover")
+                || v.Contains("foiçar") || v.Contains("foicar") || v.Contains("semear");
+        }
+
         private static bool IsAmbientNpcBark(string path)
         {
-            if (!path.Contains("Bark UI")) return false;
-            foreach (var name in FilteredAmbientNpcNames)
-            {
-                if (path.Contains(name)) return true;
-            }
-            return false;
+            // User's explicit request (rodada 134h): "oculte as conversas ao redor da cidade".
+            // Bark UI is the floating ambient-chatter bubble system - never a conversation
+            // directed at the player (real dialogue goes through the subtitle/response UI, not
+            // Bark UI). So filter ALL of them now, not just the original three NPC names.
+            return path.Contains("Bark UI");
         }
 
         private static string HierarchyPath(Transform t)

@@ -46,7 +46,7 @@ namespace TravellersRestAccess
         // request, and a new "Repositivos" category for placed consumables that are working but
         // will need restocking (candles). Associated benches leave "Pendentes" automatically (see
         // BuildTargetList - only unassociated benches are listed now).
-        private static readonly string[] CategoryOrder = { "Portas", "Pendentes", "Repositivos", "Containers", "Máquinas", "Coletáveis", "Decorativos" };
+        private static readonly string[] CategoryOrder = { "Portas", "NPCs", "Pendentes", "Repositivos", "Containers", "Máquinas", "Cultivo", "Materiais", "Coletáveis", "Decorativos" };
 
         // Candle item id (confirmed in decompiled SurfaceSortOrder/HouseKeeper: ItemDatabaseAccessor
         // .GetItem(605) is the candle, and the live GameObjects are "605 - Vela(Clone)").
@@ -144,6 +144,13 @@ namespace TravellersRestAccess
         private Vector3 _lastRequestTo;
         private bool _isRetryAttempt;
 
+        // Multi-area routing: when the final target is in a different Location, we first
+        // route to the TravelZone exit, then re-route to the real target once the player
+        // crosses into the new area. _finalTarget stores the real destination during that
+        // intermediate leg; _lastGuidancePlayerLocation tracks location changes mid-route.
+        private (string name, Vector3 position)? _finalTarget;
+        private Location _lastGuidancePlayerLocation;
+
         // User's explicit request: a log comparing how many movement-key taps it actually
         // took to clear a step against the number that was announced for it, so calibration
         // can be checked from hard numbers instead of guessed.
@@ -168,6 +175,12 @@ namespace TravellersRestAccess
         private const float BlockerAnnounceSeconds = 0.2f;
         private Vector3? _lastWallCheckPosition;
         private float _wallStuckTime;
+
+        // User's explicit request (rodada 134k): if the player bumps a wall ~6 times in a row
+        // while being guided, force an immediate re-route to get them unstuck efficiently.
+        private int _consecutiveBumps;
+        private float _lastBumpTime;
+        private const int BumpsBeforeReroute = 6;
         // Round 105: speak WHAT is blocking the player when stuck on an item (round-105 log: the
         // player was wedged against "Grupo Ladrillos" - a tutorial brick pile - right at the tavern
         // door and had no way to know without reading the log). Announced once per blocker.
@@ -216,6 +229,16 @@ namespace TravellersRestAccess
             // guard here instead of repeating it in every method that needs the player.
             if (PlayerController.GetPlayer(1) == null) return;
 
+            // Applies/lifts the mute on its transition (see CustomSounds) - must run every frame,
+            // even with a UI open, so sounds reliably resume after dialogue/menu. UiOpen extends the
+            // mute to ALL menus/stations (project rule: our world sounds are silenced in any UI).
+            CustomSounds.UiOpen = anyUiOpen;
+            CustomSounds.UpdateConversationMute();
+
+            HandleTutorialHelpKey();
+            HandleTavernOpenClose();
+            HandleQuickSave();
+
             if (!anyUiOpen)
             {
                 HandleSimulatedClick();
@@ -232,6 +255,10 @@ namespace TravellersRestAccess
                 HandleDirectionChangeSound();
                 HandleDirectionalWallSound();
                 HandleItemProximitySounds();
+                HandleNearbyResourceAnnouncement();
+                HandleArableZoneAnnouncement();
+                HandleToolAimAnnouncement();
+                HandleWellProximitySound();
                 HandleFloorDirtAnnouncement();
                 RefreshSeatSceneCache();
                 HandleSeatAnnouncement();
@@ -244,6 +271,10 @@ namespace TravellersRestAccess
                 HandleExpelKey();
                 HandleMopBackspace();
             }
+
+            // Runs regardless of anyUiOpen: the Post Box is a UI, so its letter content must
+            // be read while that UI is open (user: "abri uma carta e só leu Voltar").
+            HandlePostboxAnnouncement();
 
             Vector3 playerPos = PlayerController.GetPlayerPosition(1);
 
@@ -317,6 +348,10 @@ namespace TravellersRestAccess
             }
             foreach (var door in _cachedDoors)
             {
+                // Null-check: confirmed in the city log (NRE every second) that a cached door
+                // can be destroyed during an area transition before the cache refreshes,
+                // leaving a Unity fake-null whose .transform throws.
+                if (door == null) continue;
                 float distance = Vector3.Distance(playerPos, door.transform.position);
                 DebugLogger.LogState($"WorldNav: Door \"{door.gameObject.name}\" pos={door.transform.position} dist={distance:F1}");
             }
@@ -455,21 +490,16 @@ namespace TravellersRestAccess
                 _currentPath = null;
                 _simplifiedSteps = null;
                 _currentStepIndex = 0;
-                // User reported hearing a wrong, "shortest line" message right when turning
-                // guidance on, before the real route arrived (the old code spoke the
-                // fallback straight-line guess immediately, then the real route a moment
-                // later). Now says nothing premature - just announces it's computing, and
-                // OnPathComputed below announces the real first step once it's ready.
+                _finalTarget = null;
+                _lastGuidancePlayerLocation = PlayerController.GetPlayer(1)?.LEOIMFNKFGA ?? Location.None;
                 _isInitialPathRequest = true;
                 ScreenReader.Say("Calculando rota...", interrupt: true);
                 RequestPathToTarget(PlayerController.GetPlayerPosition(1), _selectedTarget.Value.position);
             }
             else
             {
-                // Round 113: turning the guide off also UNMARKS the target - the user "desativei o
-                // guia" and expected it gone, but the C-key coordinate readout kept announcing the
-                // old target. Clear it so C reports just the position until a new target is picked.
                 _selectedTarget = null;
+                _finalTarget = null;
                 _currentPath = null;
                 _simplifiedSteps = null;
                 ScreenReader.Say("Guia desativado", interrupt: true);
@@ -481,24 +511,57 @@ namespace TravellersRestAccess
         private void HandleGuidanceUpdate()
         {
             if (!_guidanceActive || _selectedTarget == null) return;
-            // Found the actual cause of the "two routes spoken" bug: this runs every frame
-            // once guidance is active (and the very first call always passes the movement
-            // check below, since _lastGuidancePosition starts null), so it was firing and
-            // speaking the straight-line fallback BEFORE the first real route came back -
-            // interrupting "Calculando rota..." within milliseconds (confirmed in log: both
-            // lines logged 8ms apart). OnPathComputed already announces the real first step
-            // once it's ready, so this just needs to stay quiet until then.
             if (_isInitialPathRequest) return;
 
             Vector3 pos = PlayerController.GetPlayerPosition(1);
-            if (_lastGuidancePosition.HasValue && Vector3.Distance(_lastGuidancePosition.Value, pos) < TileSize) return;
 
+            // Multi-area routing: detect when the player crosses into a new area.
+            // When that happens, discard the intermediate TravelZone target and re-route
+            // to the real final destination from the new position.
+            Location currentLoc = PlayerController.GetPlayer(1)?.LEOIMFNKFGA ?? Location.None;
+            if (_finalTarget.HasValue && currentLoc != Location.None && currentLoc != _lastGuidancePlayerLocation)
+            {
+                if (Main.DebugMode) DebugLogger.LogState($"WorldNav: Player crossed into {currentLoc} — re-routing to final target \"{_finalTarget.Value.name}\"");
+                _lastGuidancePlayerLocation = currentLoc;
+                _selectedTarget = _finalTarget;
+                _finalTarget = null;
+                _lastGuidancePosition = null;
+                _currentPath = null;
+                _simplifiedSteps = null;
+                _currentStepIndex = 0;
+                _isInitialPathRequest = true;
+                _pathRequestPending = false;
+                RequestPathToTarget(pos, _selectedTarget.Value.position);
+                return;
+            }
+
+            // No further destination chained: if we just crossed into a NEW area and the
+            // target is in a DIFFERENT area than where we now are (i.e. it's the passage we
+            // just walked through, now behind us in the old area), we've arrived. End the
+            // guide instead of computing a nonsensical delta across two coordinate spaces -
+            // confirmed bug: the instant the player entered the tavern it said "1833 pra
+            // baixo" (player at tavern y=903, target at road y=-12).
+            if (currentLoc != Location.None && currentLoc != _lastGuidancePlayerLocation)
+            {
+                Location targetLoc = Utils.HJPCBBGHPDA(_selectedTarget.Value.position);
+                if (targetLoc != Location.None && targetLoc != currentLoc)
+                {
+                    if (Main.DebugMode) DebugLogger.LogState($"WorldNav: Crossed into {currentLoc}, target \"{_selectedTarget.Value.name}\" is in {targetLoc} (behind us) — arrived, ending guide");
+                    _lastGuidancePlayerLocation = currentLoc;
+                    ScreenReader.Say("Você chegou", interrupt: true);
+                    _guidanceActive = false;
+                    _selectedTarget = null;
+                    _finalTarget = null;
+                    _currentPath = null;
+                    _simplifiedSteps = null;
+                    return;
+                }
+            }
+            _lastGuidancePlayerLocation = currentLoc;
+
+            if (_lastGuidancePosition.HasValue && Vector3.Distance(_lastGuidancePosition.Value, pos) < TileSize) return;
             _lastGuidancePosition = pos;
 
-            // User reported guidance "getting all messed up" when walking AWAY from the
-            // planned route - the periodic refresh alone (every PathRequestCooldown) wasn't
-            // reacting fast enough. Now also re-routes immediately (ignoring the cooldown)
-            // once perpendicular drift from the current step's line gets too large.
             bool offTrack = IsOffTrack(pos);
             if (offTrack || Time.unscaledTime - _lastPathRequestTime > PathRequestCooldown)
             {
@@ -546,13 +609,12 @@ namespace TravellersRestAccess
                     canWalkDiagonal = true,
                     avoidWalls = true,
                     avoidObjects = true,
-                    // Lowered to 1500 a few rounds ago to speed up "Rota calculada", flagged
-                    // at the time as a speed/reliability trade-off needing real testing. Now
-                    // confirmed bad via log: "Bar" failed every attempt (including the nudged
-                    // retry) while far away, then succeeded the moment the player got close -
-                    // a budget too small for longer searches, not a genuinely blocked path.
-                    // Raised partway back up.
-                    maxNodes = 2500,
+                    // 1500→2500→5000→3500. 5000 made FAILED searches slow (they explore the
+                    // whole budget) - user: "o cálculo está demorando muito". With passages now
+                    // routed to a walkable approach point, in-area searches succeed with far
+                    // fewer nodes, so 3500 keeps cross-area reach while completing noticeably
+                    // faster on the hard cases.
+                    maxNodes = 3500,
                     callback = OnPathComputed,
                 };
                 PathRequestManager.RequestPath(info);
@@ -582,12 +644,8 @@ namespace TravellersRestAccess
                 _currentStepIndex = 0;
                 if (Main.DebugMode) DebugLogger.LogState("WorldNav: Pathfinding returned no route");
 
-                // User's explicit request: still give step-by-step guidance toward a
-                // blocked destination (e.g. a closed door's exact threshold tile, which the
-                // game only marks walkable while open) instead of falling back to the old
-                // straight-line message. Retry once, aiming one tile back toward the player
-                // along the same line - the block is usually just the very last tile, so
-                // this should land on a tile that's already walkable.
+                // Nudge retry: the last tile of a closed door is sometimes blocked; backing
+                // off one tile toward the player usually lands on a walkable spot.
                 if (!_isRetryAttempt)
                 {
                     Vector3 nudge = _lastRequestFrom - _lastRequestTo;
@@ -597,6 +655,27 @@ namespace TravellersRestAccess
                         if (Main.DebugMode) DebugLogger.LogState($"WorldNav: Retrying route nudged toward player: {retryGoal}");
                         _isInitialPathRequest = wasInitial;
                         RequestPathToTarget(_lastRequestFrom, retryGoal, isRetry: true);
+                        return;
+                    }
+                }
+
+                // Multi-area fallback: A* failed (node budget or physical disconnect).
+                // If the target is in another area, route to the intermediate TravelZone
+                // exit first — a short in-area route A* can always find.
+                Location playerLoc = PlayerController.GetPlayer(1)?.LEOIMFNKFGA ?? Location.None;
+                Location targetLoc = Utils.HJPCBBGHPDA(_lastRequestTo);
+                if (playerLoc != Location.None && playerLoc != targetLoc && !_finalTarget.HasValue)
+                {
+                    var passage = FindPassageToward(playerLoc, targetLoc, _lastRequestTo);
+                    if (passage.HasValue && Vector3.Distance(passage.Value.position, _lastRequestFrom) > TileSize)
+                    {
+                        if (Main.DebugMode) DebugLogger.LogState($"WorldNav: Cross-area fallback — routing to passage \"{passage.Value.name}\" at {passage.Value.position}");
+                        _finalTarget = _selectedTarget;
+                        _lastGuidancePlayerLocation = playerLoc;
+                        _selectedTarget = ($"Saída → {passage.Value.name}", passage.Value.position);
+                        _isInitialPathRequest = wasInitial;
+                        RequestPathToTarget(_lastRequestFrom, passage.Value.position);
+                        if (wasInitial) ScreenReader.Say($"Vá para a saída em direção a {passage.Value.name}", interrupt: true);
                         return;
                     }
                 }
@@ -626,6 +705,13 @@ namespace TravellersRestAccess
         // cardinal direction. A step whose horizontal and vertical delta are equal (a true
         // diagonal move) is assigned to whichever axis was last in use, to avoid 1-tile
         // direction flip-flopping on an otherwise straight diagonal corridor.
+        // A* path waypoints are on a 0.25-unit grid, so a route running mostly straight
+        // produces tiny perpendicular "jogs" (e.g. a single 0.25-tile step up in the middle
+        // of a long leftward leg). Those became phantom "1 pra cima/baixo" steps the player's
+        // ~0.56 movement step could never land on, so they bounced. Intermediate steps
+        // shorter than this are dropped as noise (the final destination step is always kept).
+        private const float MinStepLength = TileSize; // 0.5 = one tile
+
         private static List<(string direction, Vector3 endPosition)> SimplifyPath(Vector3 start, Vector2[] path)
         {
             var steps = new List<(string direction, Vector3 endPosition)>();
@@ -656,7 +742,37 @@ namespace TravellersRestAccess
                 prev = next;
             }
             if (currentDirection != null) steps.Add((currentDirection, currentEnd));
-            return steps;
+
+            // Drop tiny intermediate jog steps (A*-grid noise). Measure each step's length
+            // along its own axis from the last KEPT point; skip short non-final ones. This
+            // kills the phantom-step bounce WITHOUT cutting real corners (so the step-advance
+            // threshold can stay tight and not steer the player into walls early).
+            var filtered = new List<(string direction, Vector3 endPosition)>();
+            Vector3 segStart = start;
+            for (int i = 0; i < steps.Count; i++)
+            {
+                bool isLast = i == steps.Count - 1;
+                float axisLen = (steps[i].direction == "cima" || steps[i].direction == "baixo")
+                    ? Mathf.Abs(steps[i].endPosition.y - segStart.y)
+                    : Mathf.Abs(steps[i].endPosition.x - segStart.x);
+                if (isLast || axisLen >= MinStepLength)
+                {
+                    filtered.Add(steps[i]);
+                    segStart = steps[i].endPosition;
+                }
+            }
+
+            // Merge any steps that ended up adjacent in the same direction after dropping
+            // the jogs between them (e.g. "esquerda 5" + "esquerda 13" -> "esquerda 18").
+            var merged = new List<(string direction, Vector3 endPosition)>();
+            foreach (var s in filtered)
+            {
+                if (merged.Count > 0 && merged[merged.Count - 1].direction == s.direction)
+                    merged[merged.Count - 1] = (s.direction, s.endPosition);
+                else
+                    merged.Add(s);
+            }
+            return merged;
         }
 
         // User's explicit request: stop reading the count as plain Euclidean distance to
@@ -676,12 +792,25 @@ namespace TravellersRestAccess
             return Mathf.RoundToInt(ComputeAxisDistance(pos, step) / TileSize);
         }
 
-        // Tightened to TileSize*0.3 last round (user felt steps switched too early) - but
-        // that caused a worse regression, confirmed in log: a short 2-tile step got stuck
-        // oscillating "1 pra direita"/"1 pra esquerda" for over a minute, distance hovering
-        // between 0.17 and 0.49 - frequently ABOVE the tighter threshold, so it kept never
-        // quite resolving. Reverted to the original, more forgiving rounding boundary.
-        private const float StepAdvanceThreshold = TileSize * 0.5f;
+        // Lowered 1.4->1.2 tiles (0.7->0.6). 0.7 cleared the bounce but cut CORNERS - the
+        // player turned ~1.4 tiles early and walked into walls (user: "dou de cara com as
+        // paredes"). The phantom-step bounce is now killed at the source by dropping tiny
+        // jog steps in SimplifyPath (see MinStepLength), so this only needs to cover the
+        // player's own ~0.56 overshoot at a real waypoint - 0.6 does that without cutting
+        // corners as aggressively.
+        private const float StepAdvanceThreshold = TileSize * 1.2f;
+
+        // Final-destination arrival radius. Confirmed in log (real bug, not a guess): the
+        // player's per-tap movement step (~0.56 units) is LARGER than the old per-axis
+        // arrival window (TileSize*0.5 = 0.25), so for any destination sitting off the
+        // player's movement grid they overshoot it every single step and oscillate
+        // "1 pra cima"/"1 pra baixo" forever, never rounding to 0 - stuck 46s at a tavern
+        // passage. A ~1-tile 2D radius means "close enough to step onto / interact", which
+        // is exactly right for a door/passage trigger and still precise for small objects.
+        // Bumped 1.2->1.8->2.0 (0.6->0.9->1.0) per user "se estava uma telha coloque duas".
+        // A full two tiles of arrival slack: the per-tap step (~0.56) can't overshoot a
+        // 1.0-radius circle, so the "Você chegou" fires cleanly without the back-and-forth.
+        private const float FinalArrivalRadius = TileSize * 2.0f;
 
         // Confirmed in log (real bug, not a guess): if the player overshoots a step's end
         // point (ends up on the far side of it), the chunk's direction label - fixed back
@@ -741,10 +870,11 @@ namespace TravellersRestAccess
                 // so once the chunk's own axis is satisfied this also checks the OTHER axis
                 // instead of getting stuck repeating "Continuando..." right at the doorstep.
                 Vector3 delta = step.endPosition - pos;
-                int dy = Mathf.RoundToInt(Mathf.Abs(delta.y) / TileSize);
-                int dx = Mathf.RoundToInt(Mathf.Abs(delta.x) / TileSize);
 
-                if (dy == 0 && dx == 0)
+                // Arrival uses a 2D radius (~1 tile), not exact tile alignment - see
+                // FinalArrivalRadius. Fixes the overshoot oscillation where the player could
+                // never land inside the old 0.25 per-axis window given their ~0.56 step.
+                if (delta.sqrMagnitude <= FinalArrivalRadius * FinalArrivalRadius)
                 {
                     // User's explicit request: turn the guide off automatically on arrival
                     // instead of leaving it active and needing a manual Home press to stop.
@@ -752,7 +882,10 @@ namespace TravellersRestAccess
                     return "Você chegou";
                 }
 
-                return dy >= dx
+                int dy = Mathf.Max(1, Mathf.RoundToInt(Mathf.Abs(delta.y) / TileSize));
+                int dx = Mathf.Max(1, Mathf.RoundToInt(Mathf.Abs(delta.x) / TileSize));
+
+                return Mathf.Abs(delta.y) >= Mathf.Abs(delta.x)
                     ? $"{dy} pra {(delta.y > 0 ? "cima" : "baixo")}"
                     : $"{dx} pra {(delta.x > 0 ? "direita" : "esquerda")}";
             }
@@ -784,27 +917,12 @@ namespace TravellersRestAccess
                 return;
             }
 
-            // No route yet (still computing this round, or the request failed). User
-            // reported guidance leading straight into walls and not making sense once
-            // the target is past a door - a straight-line guess across different game
-            // Locations is actively misleading, so say so instead of guessing, same as
-            // before real pathfinding existed.
-            Location playerLocation = PlayerController.GetPlayer(1).LEOIMFNKFGA;
-            Location targetLocation = Utils.HJPCBBGHPDA(targetPos);
-            if (playerLocation != Location.None && targetLocation != Location.None && playerLocation != targetLocation)
-            {
-                string areaName = LocationNames.TryGetValue(targetLocation, out var known) ? known : targetLocation.ToString();
-                ScreenReader.Say($"Calculando rota até {areaName}...", interrupt: true);
-                DebugLogger.LogState($"WorldNav: No route yet, target in different area ({playerLocation} vs {targetLocation})");
-                return;
-            }
-
-            // User's explicit request: never speak two directions at once, even in this
-            // no-route fallback ("4 pra esquerda, 3 pra baixo" - "tem que mostrar um de
-            // cada vez"). Also found while re-checking this: it never divided by TileSize,
-            // unlike every other distance-to-telha conversion in this file (ComputeStepCount,
-            // etc.) - was speaking raw world units as if they were telhas, double the real
-            // count. Fixed both at once.
+            // No A* route yet. If we're doing cross-area routing and already chaining to
+            // an intermediate passage, the selected target IS the passage — straight-line
+            // fallback to it (same area, short distance) is safe and useful.
+            // If NOT chaining yet and the target is in another Location, give a directional
+            // bearing to the target so the player has some sense of where to go while A*
+            // computes or while we wait for the cross-area fallback to kick in.
             Vector3 delta = targetPos - pos;
             int dy = Mathf.RoundToInt(Mathf.Abs(delta.y) / TileSize);
             int dx = Mathf.RoundToInt(Mathf.Abs(delta.x) / TileSize);
@@ -827,6 +945,101 @@ namespace TravellersRestAccess
             DebugLogger.LogState($"WorldNav: Guidance to \"{_selectedTarget.Value.name}\" -> {fallbackMessage} (sem rota ainda)");
         }
 
+        // Returns the TravelZone (exit from `playerLoc`) whose world position is closest
+        // to `targetPos` — used when A* fails cross-area to find a safe intermediate waypoint
+        // that IS reachable inside the player's current area.
+        // When `targetLoc` is a known Location, a BFS picks the correct first hop in the
+        // area graph; when it's Location.None / unmapped, the nearest exit by world distance
+        // is used as a heuristic (the map is geographically coherent, so it works).
+        private (string name, Vector3 position)? FindPassageToward(Location playerLoc, Location targetLoc, Vector3 targetPos)
+        {
+            try
+            {
+                var tzm = TravelZonesManager.GGFJGHHHEJC;
+                if (tzm == null || !tzm.allTravelZones.ContainsKey(playerLoc)) return null;
+
+                var exits = tzm.allTravelZones[playerLoc];
+                if (exits == null || exits.Count == 0) return null;
+
+                // BFS to find the next hop toward targetLoc (when it's a known Location).
+                if (targetLoc != Location.None && tzm.allTravelZones.ContainsKey(targetLoc))
+                {
+                    Location nextHop = FindNextHop(playerLoc, targetLoc);
+                    if (nextHop != Location.None && exits.ContainsKey(nextHop))
+                    {
+                        var tz = exits[nextHop];
+                        string name = LocationNames.TryGetValue(nextHop, out var n) ? n : nextHop.ToString();
+                        return (name, tz.position);
+                    }
+                }
+
+                // Fallback: pick the exit whose world position is closest to the target.
+                (string name, Vector3 position)? best = null;
+                float bestDist = float.MaxValue;
+                foreach (var kv in exits)
+                {
+                    if (kv.Value == null) continue;
+                    float dist = Vector3.Distance(kv.Value.position, targetPos);
+                    if (dist < bestDist)
+                    {
+                        bestDist = dist;
+                        string n = LocationNames.TryGetValue(kv.Key, out var ln) ? ln : "saída";
+                        best = (n, kv.Value.position);
+                    }
+                }
+                return best;
+            }
+            catch (System.Exception ex)
+            {
+                if (Main.DebugMode) DebugLogger.LogState($"WorldNav: FindPassageToward threw: {ex.Message}");
+                return null;
+            }
+        }
+
+        // BFS over the area graph to find the first Location to hop to when going from
+        // `from` toward `to`.
+        private static Location FindNextHop(Location from, Location to)
+        {
+            try
+            {
+                var tzm = TravelZonesManager.GGFJGHHHEJC;
+                if (tzm == null) return Location.None;
+
+                var queue = new Queue<Location>();
+                var visited = new HashSet<Location> { from };
+                var parent = new Dictionary<Location, Location>();
+
+                queue.Enqueue(from);
+                while (queue.Count > 0)
+                {
+                    Location current = queue.Dequeue();
+                    if (current == to)
+                    {
+                        // Trace back to find the first hop from `from`
+                        Location step = to;
+                        while (parent.ContainsKey(step) && parent[step] != from)
+                            step = parent[step];
+                        return step;
+                    }
+                    if (!tzm.allTravelZones.ContainsKey(current)) continue;
+                    foreach (var kv in tzm.allTravelZones[current])
+                    {
+                        if (!visited.Contains(kv.Key))
+                        {
+                            visited.Add(kv.Key);
+                            parent[kv.Key] = current;
+                            queue.Enqueue(kv.Key);
+                        }
+                    }
+                }
+                return Location.None;
+            }
+            catch
+            {
+                return Location.None;
+            }
+        }
+
         private void HandleFootsteps()
         {
             var player = PlayerController.GetPlayer(1);
@@ -846,17 +1059,38 @@ namespace TravellersRestAccess
 
             _lastFootstepPosition = pos;
 
-            // Properly decompiled AlmenaraGames.MultiAudioManager/AudioObject this round
-            // (not guessing) to find out why the trigger always fired but nothing was ever
-            // heard: confirmed AudioObject.clips was NOT empty and a valid AudioClip WAS
-            // selected and assigned every time (no "doesn't have a valid Audio Clip"
-            // warning ever appeared in the log) - so it's not a missing-data issue. The
-            // actual audibility depends on this 3rd-party plugin's own multi-listener/
-            // volume-by-distance system (MultiAudioListener, separate from Unity's built-in
-            // AudioListener), which is too deep to safely unwind from outside its normal
-            // init flow. No footstep sound for now - user asked to remove the reused click
-            // rather than keep a sound that doesn't mean "footstep" - will wire up a
-            // dedicated sound the moment a file for it is provided.
+            // [73] One footstep per tile of movement, using the GAME's own terrain-correct step
+            // clips (Sound.stepsDirt/Grass/Wood/Stone), played through our 2D AudioSource (the
+            // game's MultiAudioManager path is silent for the mod). This gives a step sound on
+            // EVERY move regardless of the game's own 0.5s footstep cooldown.
+            var clip = PickFootstepClip(player, pos);
+            if (clip != null) CustomSounds.PlayGameClip(clip, FootstepVolume);
+        }
+
+        private const float FootstepVolume = 0.55f;
+
+        private static AudioClip PickFootstepClip(PlayerController player, Vector3 pos)
+        {
+            try
+            {
+                var sound = Sound.GGFJGHHHEJC;
+                if (sound == null) return null;
+                AudioClip[] arr = sound.stepsDirt;
+                if (WorldGrid.GCGNCHFNEBJ(pos, out var tile))
+                {
+                    if (tile.groundType.HasFlag(GroundType.Floor))
+                        arr = tile.materialType == MaterialType.Wood ? sound.stepsWood
+                            : tile.materialType == MaterialType.Stone ? sound.stepsStone
+                            : sound.stepsDirt;
+                    else if (tile.groundType.HasFlag(GroundType.Stone)) arr = sound.stepsStone;
+                    else if (tile.groundType.HasFlag(GroundType.Grass)) arr = sound.stepsGrass;
+                    else arr = sound.stepsDirt;
+                }
+                if (arr == null || arr.Length == 0) arr = sound.stepsDirt;
+                if (arr == null || arr.Length == 0) return null;
+                return arr[UnityEngine.Random.Range(0, arr.Length)];
+            }
+            catch { return null; }
         }
 
         private void HandleWallBump()
@@ -906,6 +1140,20 @@ namespace TravellersRestAccess
                 if (_bumpIsItem) { CustomSounds.StopWallBumpLoop(); CustomSounds.StartItemBumpLoop(); }
                 else { CustomSounds.StopItemBumpLoop(); CustomSounds.StartWallBumpLoop(); }
                 if (Main.DebugMode) DebugLogger.LogState($"WorldNav: bump classified as {(_bumpIsItem ? "item" : "wall")}{(_bumpBlockerName != null ? $" ({_bumpBlockerName})" : "")}");
+
+                // Count consecutive bumps (reset if it's been a while since the last one -
+                // those are separate incidents, not a stuck streak). After enough in a row,
+                // force a fresh route so the guide actively pulls the player off the wall.
+                if (Time.unscaledTime - _lastBumpTime > 5f) _consecutiveBumps = 0;
+                _lastBumpTime = Time.unscaledTime;
+                _consecutiveBumps++;
+                if (_guidanceActive && _selectedTarget != null && _consecutiveBumps >= BumpsBeforeReroute)
+                {
+                    _consecutiveBumps = 0;
+                    if (Main.DebugMode) DebugLogger.LogState("WorldNav: stuck on wall repeatedly - forcing reroute");
+                    ScreenReader.Say("Recalculando rota", interrupt: true);
+                    RequestPathToTarget(pos, _selectedTarget.Value.position);
+                }
             }
 
             // Speak the blocker name + direction once, a bit after the sound (BlockerAnnounceSeconds)
@@ -1170,6 +1418,791 @@ namespace TravellersRestAccess
         private float _lastItemSoundCycleTime;
         private bool _itemSoundCycleRunning;
 
+        // (Standing-tile terrain announcement removed at the user's request - replaced by the
+        // direction-aware front-tile announcer below, which always speaks the tile AHEAD.)
+
+        // Interactable ground only - returns null for tiles with no farming/gathering use, so the
+        // per-step announcement stays silent on them. Overlays first (accurate current state),
+        // then the tile's groundType.
+        private static string UsefulGroundName(Vector3 pos)
+        {
+            try
+            {
+                if (WorldGrid.MMIIIKBJKBA<FertileSoil>(pos) != null) return "Terra arada";
+                if (WorldGrid.MMIIIKBJKBA<HoleInGround>(pos) != null) return "Buraco";
+                if (WorldGrid.GCGNCHFNEBJ(pos, out var tile))
+                {
+                    if (tile.hasSnow) return null;
+                    var gt = tile.groundType;
+                    if (gt.HasFlag(GroundType.TilledEarth)) return "Terra arada";
+                    if (gt.HasFlag(GroundType.Grass)) return "Grama";
+                    if (gt.HasFlag(GroundType.Ground)) return "Terra";
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        // ===== Mira de ferramentas (foice/enxada/pá/picareta/machado/regador/semente) =====
+        // O jogo mira a ferramenta na telha à frente, na DIREÇÃO QUE O JOGADOR ENCARA
+        // (characterAnimation.FCGBJEIIMBC - a mesma que as ferramentas usam), não no mouse.
+        // Para um jogador cego isso é invisível: ele não sabe pra onde está virado nem se há
+        // um alvo compatível à frente. Este handler (1) anuncia o alvo útil à frente conforme a
+        // ferramenta na mão, ao virar/andar; e (2) ao apertar F sem alvo válido, avisa "Nada à
+        // frente" (o jogo já toca o som do golpe no vazio).
+        private enum ToolKind { None, Sickle, Hoe, Spade, Seed, Watering, Pick, Axe }
+        private static readonly float FrontObjectRadius = TileSize * 2.2f;
+        private Vector2Int _lastFrontTile = new Vector2Int(int.MinValue, int.MinValue);
+        private string _lastFrontContent = null;
+        private const float FrontScanInterval = 0.05f;  // proactive front-tile scan throttle (the
+        private float _lastFrontScanTime;               // per-frame cost is 3 cached-list sweeps)
+        // 1-sample debounce: tapping WASD turns AND steps the character, so a transient intermediate
+        // tile flashes before the final one - announcing both was the "anuncia duas vezes ao virar"
+        // report. Only announce a (tile,content) that persists across two scans; the transient is
+        // skipped. A walked-onto tile stays put for several scans, so it still announces (once).
+        private Vector2Int _pendingFrontTile = new Vector2Int(int.MinValue, int.MinValue);
+        private string _pendingFrontContent = null;
+
+        private static ToolKind ClassifyHeldTool()
+        {
+            var item = PlayerInventory.GetPlayer(1)?.actionBarInventory?.GetSelectedItem();
+            if (item == null) return ToolKind.None;
+            if (item is Sickle) return ToolKind.Sickle;
+            if (item is Hoe) return ToolKind.Hoe;
+            if (item is Spade) return ToolKind.Spade;
+            if (item is Seed) return ToolKind.Seed;
+            if (item is WateringCan) return ToolKind.Watering;
+            if (item is Pick) return ToolKind.Pick;
+            if (item is Ax) return ToolKind.Axe;
+            return ToolKind.None;
+        }
+
+        // The tile one step ahead in the faced direction - the tile the tools act on (the valid
+        // "blue square"). MUST match ToolCursorAimPatch exactly: snap the player to their tile
+        // CENTER first (WorldGrid.LOJBKLKMINM), THEN step one 0.5-cell ahead, so the announced tile
+        // is the same cell the tool targets (the grid is quantized to 0.5 and uses Mathf.Floor).
+        private static Vector3 FrontTilePosition() => ChosenToolTile();
+
+        // The tile the held tool will actually act on. LOG PROOF (round 146): the game's diggable
+        // "blue squares" are a CLUSTER around the player (own cell + some neighbours), NOT the tile
+        // the player faces - so aiming blindly at the facing tile missed. Instead we pick a tile the
+        // GAME marks diggable RIGHT NOW: the facing tile if it's blue, else the blue tile nearest to
+        // the facing direction (own cell + 8 neighbours). Cached per frame (called from the hot
+        // GetCursorWorldPosition postfix). Falls back to the facing tile when nothing is diggable
+        // (no tool / not on the farm) so the plain terrain announcement still works.
+        private static int _chosenFrame = -1;
+        private static Vector3 _chosenTile;
+        public static Vector3 ChosenToolTile()
+        {
+            if (Time.frameCount == _chosenFrame) return _chosenTile;
+            _chosenFrame = Time.frameCount;
+
+            Vector3 center = WorldGrid.LOJBKLKMINM(PlayerController.GetPlayerPosition(1));
+            Vector3 facingTile = center + Utils.NGFODNCHPHB(PlayerController.GetPlayer(1).characterAnimation.FCGBJEIIMBC) * TileSize;
+            _chosenTile = facingTile;
+            try
+            {
+                ToolKind kind = ClassifyHeldTool();
+                if (!IsGroundTool(kind)) return _chosenTile;
+
+                // Facing tile first (respect the player's intent when it's actionable).
+                if (ToolCanActAt(kind, facingTile)) { _chosenTile = facingTile; return _chosenTile; }
+
+                // Else the actionable tile nearest to where they're facing (own cell + 8 neighbours).
+                float bestD = float.MaxValue; Vector3 best = facingTile; bool found = false;
+                if (ToolCanActAt(kind, center)) { best = center; bestD = Vector3.Distance(facingTile, center); found = true; }
+                foreach (var m in WorldGrid.allNeighbours)
+                {
+                    Vector3 c = center + m.position;
+                    if (!ToolCanActAt(kind, c)) continue;
+                    float d = Vector3.Distance(facingTile, c);
+                    if (d < bestD) { bestD = d; best = c; found = true; }
+                }
+                _chosenTile = found ? best : facingTile;
+            }
+            catch { }
+            return _chosenTile;
+        }
+
+        // Cardinal direction from the player's cell to a target tile ("à frente" when it's the
+        // facing tile), for announcing where the chosen diggable tile is.
+        private static string DirectionToTile(Vector3 target)
+        {
+            try
+            {
+                Vector3 center = WorldGrid.LOJBKLKMINM(PlayerController.GetPlayerPosition(1));
+                Vector3 d = target - center;
+                if (d.sqrMagnitude < 0.01f) return "aqui";
+                if (Mathf.Abs(d.x) >= Mathf.Abs(d.y)) return d.x > 0 ? "à direita" : "à esquerda";
+                return d.y > 0 ? "acima" : "abaixo";
+            }
+            catch { return null; }
+        }
+
+        // The compatible target for the held tool on the given tile, or null if none.
+        private string FrontTargetForTool(ToolKind kind, Vector3 frontPos)
+        {
+            switch (kind)
+            {
+                case ToolKind.Sickle:
+                    // The sickle cuts grass-clump / weed Harvestable OBJECTS only - it never changes
+                    // the ground's GroundType (so it is NOT how you "remove grass" - that's the spade).
+                    return NearestHarvestableName(frontPos);
+                case ToolKind.Hoe:
+                {
+                    // The hoe tills BARE GROUND -> tilled earth. It does NOT work on grass (grass
+                    // must be removed with the spade first), only on Ground. An empty tilled bed can
+                    // also be cleared back.
+                    if (GroundHasFlag(frontPos, GroundType.Ground) && !GroundHasFlag(frontPos, GroundType.Grass))
+                        return "terra";
+                    var fsH = WorldGrid.MMIIIKBJKBA<FertileSoil>(frontPos);
+                    if (fsH != null && fsH.plantedCropSetter == null) return "terra arada";
+                    return null;
+                }
+                case ToolKind.Spade:
+                {
+                    // The spade changes the tile: Grass -> Ground (this is "remove the grass"),
+                    // Ground -> Grass, Stone -> gives a stone. It also digs trees/stumps/rocks.
+                    if (GroundHasFlag(frontPos, GroundType.Grass)) return "grama";
+                    if (GroundHasFlag(frontPos, GroundType.Stone)) return "pedra";
+                    if (GroundHasFlag(frontPos, GroundType.Ground)) return "terra";
+                    return null;
+                }
+                case ToolKind.Seed:
+                {
+                    var fs = WorldGrid.MMIIIKBJKBA<FertileSoil>(frontPos);
+                    return (fs != null && fs.plantedCropSetter == null) ? "terra arada" : null;
+                }
+                case ToolKind.Watering:
+                {
+                    var fs = WorldGrid.MMIIIKBJKBA<FertileSoil>(frontPos);
+                    return (fs != null && fs.plantedCropSetter != null) ? "planta" : null;
+                }
+                case ToolKind.Pick:
+                    return NearestMiscHarvestName(frontPos);
+                case ToolKind.Axe:
+                    return NearestTreeName(frontPos);
+            }
+            return null;
+        }
+
+        // A dry, empty tilled tile at/ahead - a seed can't plant here until it's watered.
+        private static bool FrontIsDryTilled(Vector3 p, out string hint)
+        {
+            hint = null;
+            try
+            {
+                var fs = WorldGrid.MMIIIKBJKBA<FertileSoil>(p);
+                if (fs == null || fs.plantedCropSetter != null || fs.daysUntilDry > 1) return false;
+                string dir = DirectionToTile(p);
+                hint = string.IsNullOrEmpty(dir) ? "terra arada seca, regue antes de plantar"
+                    : $"{dir}: terra arada seca, regue antes";
+                return true;
+            }
+            catch { return false; }
+        }
+
+        private static string ToolSoundKey(ToolKind k)
+        {
+            switch (k)
+            {
+                case ToolKind.Spade: return "cavar";
+                case ToolKind.Hoe: return "arar";
+                case ToolKind.Seed: return "plantar";
+                case ToolKind.Watering: return "regar";
+                case ToolKind.Sickle: return "foice";
+                case ToolKind.Pick: return "picareta";
+                case ToolKind.Axe: return "machado";
+                default: return null;
+            }
+        }
+
+        private static bool IsGroundTool(ToolKind k) =>
+            k == ToolKind.Spade || k == ToolKind.Hoe || k == ToolKind.Seed || k == ToolKind.Watering;
+
+        // Whether the held tool can ACTUALLY act on this tile. NOTE: the game's "blue square"
+        // (GetBlueSquareAtPosition) is a LOOSER pre-filter than the real gate - it skips the hoe's
+        // 8-neighbour zone sweep - so it gave false "dá pra arar" on tiles that then wouldn't till.
+        // We replicate each tool's real validity (from HoeInstance.NBFBPMNMBJG:382 /
+        // SpadeInstance.NBFBPMNMBJG:78 / Seed / WateringCan) precisely instead.
+        private static bool ToolCanActAt(ToolKind kind, Vector3 p)
+        {
+            try
+            {
+                // Necessary condition: the game must mark the tile diggable (a "blue square") - that's
+                // what its action gate (HBEBAFHEMAP) checks first. Then refine with the tool's real
+                // validity (the blue set is looser than the hoe's neighbour rule / the seed's watered
+                // requirement, so it alone gives false positives).
+                // The HOE: call the GAME'S OWN per-cell predicate (public static, this is the exact
+                // blue/red decision the game draws - HoeInstance.cs:447/498). Its blue squares don't
+                // show up in our GetBlueSquareAtPosition query (deadlock), but GOCEDDNOMPN answers
+                // "will the hoe till here" definitively, including the weeds/neighbour checks our
+                // hand-rolled CanHoe was missing.
+                if (kind == ToolKind.Hoe) return HoeInstance.GOCEDDNOMPN(p);
+
+                var gc = PlayerController.GetPlayer(1)?.gridController;
+                if (gc == null || gc.GetBlueSquareAtPosition(p) == null) return false;
+                switch (kind)
+                {
+                    case ToolKind.Spade: return CanSpade(p);
+                    case ToolKind.Seed: return CanPlant(p);
+                    case ToolKind.Watering: return CanWater(p);
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        // Diagnostic: dump a tile's real state + the GAME'S blue square there, so we can see where
+        // the game actually accepts a dig/till vs where we aim.
+        private static void DumpFarmTile(string label, Vector3 p)
+        {
+            string gt = "?";
+            try { if (WorldGrid.GCGNCHFNEBJ(p, out var t)) gt = t.groundType.ToString(); } catch { }
+            bool farm = false, wz = false, blue = false, placeable = false, allNb = false;
+            try { farm = WorldGrid.LKBLKCFOEPA(p); } catch { }
+            try { wz = WorldGrid.AGKGGAFFFGM(p) == ZoneType.WithoutZone; } catch { }
+            try { placeable = WorldGrid.GJHHDIJOILG(p); } catch { }
+            try { allNb = AllNeighboursWithoutZone(p); } catch { }
+            try { blue = PlayerController.GetPlayer(1).gridController.GetBlueSquareAtPosition(p) != null; } catch { }
+            DebugLogger.LogState($"  FarmTile {label} pos={p} ground={gt} farmable={farm} withoutZone={wz} allNbWZ={allNb} placeable={placeable} gameBlueSquare={blue}");
+        }
+
+        private static bool OnRoad()
+        { try { return PlayerController.GetPlayer(1).LEOIMFNKFGA == Location.Road; } catch { return true; } }
+        private static bool IsToolBusy()
+        { try { return PlayerController.GetPlayer(1).NILLCIMMKJE; } catch { return false; } }
+        private static bool TileHasSnow(Vector3 p)
+        { try { return WorldGrid.GCGNCHFNEBJ(p, out var t) && t.hasSnow; } catch { return false; } }
+        private static bool IsWithoutZone(Vector3 p)
+        { try { return WorldGrid.AGKGGAFFFGM(p) == ZoneType.WithoutZone; } catch { return false; } }
+        private static bool AllNeighboursWithoutZone(Vector3 p)
+        {
+            foreach (var m in WorldGrid.allNeighbours)
+                if (WorldGrid.AGKGGAFFFGM(p + m.position) != ZoneType.WithoutZone) return false;
+            return true;
+        }
+
+        // Spade: turns Grass->Ground / Ground->Grass / Stone->item on a farmable, zone-less tile.
+        // Less strict than the hoe (no 8-neighbour sweep) - that's why it "cavou muito mais".
+        private static bool CanSpade(Vector3 p)
+        {
+            if (!OnRoad() || TileHasSnow(p) || WorldGrid.GJHHDIJOILG(p)) return false;
+            bool grd = GroundHasFlag(p, GroundType.Grass) || GroundHasFlag(p, GroundType.Stone)
+                || (GroundHasFlag(p, GroundType.Ground) && !GroundHasFlag(p, GroundType.TilledEarth));
+            if (!grd) return false;
+            return WorldGrid.LKBLKCFOEPA(p) && IsWithoutZone(p);
+        }
+
+        // Hoe: tills bare Ground -> TilledEarth. Requires the tile AND all 8 neighbours to be
+        // WithoutZone (HoeInstance.cs:405-419) - the reason only a few interior farm tiles till.
+        private static bool CanHoe(Vector3 p)
+        {
+            if (!OnRoad() || TileHasSnow(p) || WorldGrid.GJHHDIJOILG(p)) return false;
+            if (!WorldGrid.LKBLKCFOEPA(p) || !IsWithoutZone(p) || !AllNeighboursWithoutZone(p)) return false;
+            if (GroundHasFlag(p, GroundType.Ground) && !GroundHasFlag(p, GroundType.TilledEarth)) return true;
+            var fs = WorldGrid.MMIIIKBJKBA<FertileSoil>(p);   // empty tilled bed can be re-cleared
+            return fs != null && fs.plantedCropSetter == null;
+        }
+
+        // Seed: plant on an EMPTY tilled soil that is WATERED (daysUntilDry > 1, Seed.cs:74).
+        private static bool CanPlant(Vector3 p)
+        {
+            var fs = WorldGrid.MMIIIKBJKBA<FertileSoil>(p);
+            return fs != null && fs.plantedCropSetter == null && fs.daysUntilDry > 1;
+        }
+
+        // Watering can: waters a tilled tile; same zone gates as the hoe.
+        private static bool CanWater(Vector3 p)
+        {
+            if (!OnRoad() || TileHasSnow(p) || WorldGrid.GJHHDIJOILG(p)) return false;
+            if (!WorldGrid.LKBLKCFOEPA(p) || !IsWithoutZone(p) || !AllNeighboursWithoutZone(p)) return false;
+            return GroundHasFlag(p, GroundType.TilledEarth);
+        }
+
+        private const float ArableScanRadius = 10f;   // world units scanned around the player
+
+        // The 0.5-grid arable scan is ~1600 cells + the hoe predicate - too heavy to run on EVERY
+        // Page Up/Down (user: "grande lag na troca das categorias"). Cache it: rescan only when a
+        // farming action changed a tile (_arableDirty, set by the OnActionDone hook), when the player
+        // walked a good distance, or after a few seconds. Tile positions are absolute, so reusing the
+        // cache while paging (standing still) is correct.
+        private float _arableScanTime = -999f;
+        private Vector3 _arableScanCenter;
+        private bool _arableDirty = true;
+        private readonly List<(string name, Vector3 position)> _arableCache = new List<(string name, Vector3 position)>();
+
+        private void ScanArableTiles(Vector3 playerPos, List<(string name, Vector3 position, string category)> list)
+        {
+            try
+            {
+                bool stale = _arableDirty || Time.unscaledTime - _arableScanTime > 5f
+                    || Vector3.Distance(playerPos, _arableScanCenter) > 4f;
+                if (stale)
+                {
+                    _arableCache.Clear();
+                    Vector3 c = WorldGrid.LOJBKLKMINM(playerPos);
+                    for (float dx = -ArableScanRadius; dx <= ArableScanRadius + 0.01f; dx += TileSize)
+                        for (float dy = -ArableScanRadius; dy <= ArableScanRadius + 0.01f; dy += TileSize)
+                        {
+                            Vector3 p = new Vector3(c.x + dx, c.y + dy, 0f);
+                            if (!WorldGrid.GCGNCHFNEBJ(p, out var tile) || !tile.farmable) continue;
+                            var gt = tile.groundType;
+                            if (gt.HasFlag(GroundType.TilledEarth)) continue;
+                            bool arar = false;
+                            try { arar = HoeInstance.GOCEDDNOMPN(p); } catch { }
+                            if (arar) { _arableCache.Add(("Pra arar", p)); continue; }
+                            if (gt.HasFlag(GroundType.Grass) && CanSpade(p)) _arableCache.Add(("Pra cavar", p));
+                        }
+                    _arableScanTime = Time.unscaledTime;
+                    _arableScanCenter = playerPos;
+                    _arableDirty = false;
+                }
+                foreach (var (name, p) in _arableCache) list.Add((name, p, "Cultivo"));
+            }
+            catch { }
+        }
+
+        // Describe the arable zone's composition when the player ENTERS the farm (tile.farmable
+        // goes false->true), so a screen-reader player gets the lay of the land while walking
+        // (user: "ao andar ter uma descrição da zona que compõe as áreas aráveis").
+        private bool _wasInFarm;
+        private bool _farmHooked;
+        private void HandleArableZoneAnnouncement()
+        {
+            EnsureFarmHooks();
+            try
+            {
+                Vector3 pos = PlayerController.GetPlayerPosition(1);
+                bool inFarm = WorldGrid.GCGNCHFNEBJ(pos, out var tile) && tile.farmable;
+                if (inFarm == _wasInFarm) return;
+                _wasInFarm = inFarm;
+                if (inFarm) AnnounceZoneSummary();   // announce on entering the farm
+            }
+            catch { }
+        }
+
+        // Re-announce the composition after a farming action (till/dig/plant/harvest/water) - user:
+        // "quando eu interagir e usar um espaço naquela zona, falar novamente quantos tem de cada".
+        // Also marks the arable cache dirty so the category counts refresh.
+        private void EnsureFarmHooks()
+        {
+            if (_farmHooked) return;
+            try
+            {
+                var cr = CommonReferences.GGFJGHHHEJC;
+                if (cr == null) return;
+                cr.OnActionDone += (playerNum, action) =>
+                {
+                    _arableDirty = true;
+                    if (Main.DebugMode) DebugLogger.LogState($"OnActionDone: action={action} inFarm={_wasInFarm}");
+                    try { if (_wasInFarm) AnnounceZoneSummary(); } catch { }
+                };
+                _farmHooked = true;
+                if (Main.DebugMode) DebugLogger.LogState("Farm hooks: subscribed to OnActionDone");
+            }
+            catch { }
+        }
+
+        private void AnnounceZoneSummary()
+        {
+            try
+            {
+                Vector3 pos = PlayerController.GetPlayerPosition(1);
+                int cavar = 0, arar = 0;
+                Vector3 c = WorldGrid.LOJBKLKMINM(pos);
+                for (float dx = -ArableScanRadius; dx <= ArableScanRadius + 0.01f; dx += TileSize)
+                    for (float dy = -ArableScanRadius; dy <= ArableScanRadius + 0.01f; dy += TileSize)
+                    {
+                        Vector3 p = new Vector3(c.x + dx, c.y + dy, 0f);
+                        if (!WorldGrid.GCGNCHFNEBJ(p, out var t) || !t.farmable) continue;
+                        if (t.groundType.HasFlag(GroundType.TilledEarth)) continue;
+                        bool a = false; try { a = HoeInstance.GOCEDDNOMPN(p); } catch { }
+                        if (a) arar++;
+                        else if (t.groundType.HasFlag(GroundType.Grass) && CanSpade(p)) cavar++;
+                    }
+                int molhada = 0, seca = 0, planta = 0;
+                foreach (var fs in Object.FindObjectsOfType<FertileSoil>())
+                {
+                    if (fs == null) continue;
+                    if (fs.plantedCropSetter != null) planta++;
+                    else if (fs.daysUntilDry > 1) molhada++;
+                    else seca++;
+                }
+                var parts = new System.Collections.Generic.List<string>();
+                if (cavar > 0) parts.Add($"{cavar} pra cavar");
+                if (arar > 0) parts.Add($"{arar} pra arar");
+                if (molhada > 0) parts.Add($"{molhada} terra molhada");
+                if (seca > 0) parts.Add($"{seca} terra seca");
+                if (planta > 0) parts.Add($"{planta} planta{(planta > 1 ? "s" : "")}");
+                ScreenReader.Say(parts.Count > 0 ? $"Roça: {string.Join(", ", parts)}" : "Roça", interrupt: false);
+            }
+            catch { }
+        }
+
+        // Name a farm tile: the planted CROP's name when it has one (so a planted tile reads
+        // "trigo, dá pra regar" not "terra arada"), else the ground state. Crop name via
+        // CropSetter -> Crop (reflection, obfuscated names, safe fallback "planta").
+        private static System.Reflection.PropertyInfo _cropProp;
+        private static System.Reflection.MethodInfo _cropNameM;
+        private static string CropOrGroundName(Vector3 pos)
+        {
+            try
+            {
+                var fs = WorldGrid.MMIIIKBJKBA<FertileSoil>(pos);
+                if (fs != null && fs.plantedCropSetter != null)
+                {
+                    var cs = fs.plantedCropSetter;
+                    if (_cropProp == null) _cropProp = cs.GetType().GetProperty("FJJCOJGJCLF");
+                    object crop = _cropProp?.GetValue(cs);
+                    if (crop != null)
+                    {
+                        if (_cropNameM == null) _cropNameM = crop.GetType().GetMethod("LOMLPPEKPJB", System.Type.EmptyTypes);
+                        string cn = _cropNameM?.Invoke(crop, null) as string;
+                        if (!string.IsNullOrEmpty(cn)) return cn;
+                    }
+                    return "planta";
+                }
+            }
+            catch { }
+            return UsefulGroundName(pos);
+        }
+
+        private static bool GroundHasFlag(Vector3 pos, GroundType flag)
+        {
+            try { return WorldGrid.GCGNCHFNEBJ(pos, out var tile) && tile.groundType.HasFlag(flag); }
+            catch { return false; }
+        }
+
+        private string NearestHarvestableName(Vector3 frontPos)
+        {
+            float best = FrontObjectRadius; string name = null;
+            foreach (var h in _cachedHarvestables)
+            {
+                if (h == null) continue;
+                float d = Vector3.Distance(frontPos, h.gameObject.transform.position);
+                if (d >= best) continue;
+                best = d;
+                name = (h.harvestedItems != null && h.harvestedItems.Length > 0 && h.harvestedItems[0].item != null)
+                    ? ItemDisplayName(h.harvestedItems[0].item) : CleanSceneObjectName(h.gameObject.name);
+            }
+            return name;
+        }
+
+        private string NearestMiscHarvestName(Vector3 frontPos)
+        {
+            float best = FrontObjectRadius; string name = null;
+            foreach (var m in _cachedMiscHarvests)
+            {
+                if (m == null) continue;
+                float d = Vector3.Distance(frontPos, m.gameObject.transform.position);
+                if (d >= best) continue;
+                best = d;
+                name = m.harvestedItems.item != null ? ItemDisplayName(m.harvestedItems.item) : CleanSceneObjectName(m.gameObject.name);
+            }
+            return name;
+        }
+
+        private string NearestTreeName(Vector3 frontPos)
+        {
+            float best = FrontObjectRadius; string name = null;
+            foreach (var t in _cachedTrees)
+            {
+                if (t == null) continue;
+                float d = Vector3.Distance(frontPos, t.gameObject.transform.position);
+                if (d >= best) continue;
+                best = d;
+                var pl = t.GetComponent<Placeable>();
+                name = pl != null ? DescribePlaceable(pl) : CleanSceneObjectName(t.gameObject.name);
+            }
+            return name;
+        }
+
+        private static string ToolVerb(ToolKind kind)
+        {
+            switch (kind)
+            {
+                case ToolKind.Sickle: return "cortar";
+                case ToolKind.Hoe: return "arar";
+                case ToolKind.Spade: return "cavar";
+                case ToolKind.Seed: return "plantar";
+                case ToolKind.Watering: return "regar";
+                case ToolKind.Pick: return "minerar";
+                case ToolKind.Axe: return "cortar";
+                default: return "usar";
+            }
+        }
+
+        private void HandleToolAimAnnouncement()
+        {
+            try
+            {
+                // The tools act on the tile ONE STEP AHEAD in the facing direction (confirmed in
+                // code: the spade/hoe accept a target only if it's a valid "blue square", and the
+                // blue square is the front tile - SpadeInstance.cs:354/363, ToolInstance.cs:1362).
+                // So we describe and validate the FRONT tile (the tile the tool will act on).
+                Vector3 frontPos = FrontTilePosition();
+                var frontTile = new Vector2Int(Mathf.RoundToInt(frontPos.x / TileSize), Mathf.RoundToInt(frontPos.y / TileSize));
+
+                // [F] No-target feedback (tool-specific): pressing F with a tool but no valid target
+                // on the front tile -> warn + a reliable "empty" cue (Sickle handled separately).
+                // KeyCode.F is the user's use key.
+                if (Input.GetKeyDown(KeyCode.F) && !IsToolBusy())
+                {
+                    // Skip while a swing is in progress (NILLCIMMKJE) - the game ignores a mid-swing
+                    // press, so a "Nada aqui" then would be a false negative.
+                    ToolKind kind = ClassifyHeldTool();
+                    if (kind != ToolKind.None)
+                    {
+                        // Ground tools: replicate the tool's REAL validity (zone/neighbours/farmable/
+                        // ground) - the user hit "diz grama mas não deixa cavar". Object tools
+                        // (sickle/pick/axe): keep the nearest-object test.
+                        bool canAct = IsGroundTool(kind)
+                            ? ToolCanActAt(kind, frontPos)
+                            : !string.IsNullOrEmpty(FrontTargetForTool(kind, frontPos));
+                        if (!canAct)
+                        {
+                            if (kind != ToolKind.Sickle) CustomSounds.PlayItemBumpOnce();
+                            ScreenReader.Say($"Nada aqui para {ToolVerb(kind)}", interrupt: true);
+                        }
+                        else
+                        {
+                            // Distinct audio cue per tool so a blind player can tell which tool acted
+                            // (user: "cada ferramenta não tem seu som"). Silent until the user adds the
+                            // .wav (see sons.txt).
+                            CustomSounds.PlayToolSound(ToolSoundKey(kind));
+                        }
+                        if (Main.DebugMode)
+                        {
+                            Vector3 pp = PlayerController.GetPlayerPosition(1);
+                            var dir = PlayerController.GetPlayer(1).characterAnimation.FCGBJEIIMBC;
+                            DebugLogger.LogState($"ToolAim: F kind={kind} dir={dir} playerPos={pp} frontPos={frontPos} frontTile={frontTile} canAct={canAct} busy={IsToolBusy()}");
+                            // Rich dump: where does the GAME actually place diggable "blue squares"?
+                            Vector3 center = WorldGrid.LOJBKLKMINM(pp);
+                            DumpFarmTile("frontPos", frontPos);
+                            DumpFarmTile("playerCell", center);
+                            DumpFarmTile("up", center + Vector3.up * 0.5f);
+                            DumpFarmTile("down", center + Vector3.down * 0.5f);
+                            DumpFarmTile("left", center + Vector3.left * 0.5f);
+                            DumpFarmTile("right", center + Vector3.right * 0.5f);
+                        }
+                    }
+                }
+
+                // Proactive: ALWAYS announce the interactable content of the FRONT tile (the one the
+                // tool acts on), independent of the tool in hand (the player may forget which tool is
+                // selected). Re-announce on EVERY change of the tile OR its content - so turning to a
+                // new tile and changing a tile in place (spade/hoe) both re-speak.
+                // Throttled (the scan sweeps 3 cached lists) - still well under one tile per tick.
+                if (Time.unscaledTime - _lastFrontScanTime < FrontScanInterval) return;
+                _lastFrontScanTime = Time.unscaledTime;
+
+                // ONE clean announcement (user: "diga um único tipo de telha, não grama+terra arada
+                // junto; só onde dá pra cavar/arar"):
+                // - With a farming tool: announce ONLY the actionable tile the tool will act on, as
+                //   "{direção}: {chão}, dá pra {verbo}". Silent when nothing near is actionable, so
+                //   walking only speaks where you can work.
+                // - Without a farming tool: just the single useful ground of the tile ahead.
+                // No crop/object chaining (that was announcing planted seeds you weren't standing on).
+                ToolKind held = ClassifyHeldTool();
+                string content;
+                if (IsGroundTool(held))
+                {
+                    if (ToolCanActAt(held, frontPos))
+                    {
+                        string g = CropOrGroundName(frontPos);
+                        string gl = string.IsNullOrEmpty(g) ? "telha" : g.ToLowerInvariant();
+                        string dir = DirectionToTile(frontPos);
+                        content = string.IsNullOrEmpty(dir)
+                            ? $"{gl}, dá pra {ToolVerb(held)}"
+                            : $"{dir}: {gl}, dá pra {ToolVerb(held)}";
+                    }
+                    else if (held == ToolKind.Seed && FrontIsDryTilled(frontPos, out string dseca))
+                    {
+                        // Guide the planting flow: a seed can only plant on WATERED tilled soil, so a
+                        // dry tilled tile reads silent otherwise (confusing). Tell them to water first.
+                        content = dseca;
+                    }
+                    else content = null;
+                }
+                else
+                {
+                    // No farming tool in hand -> stay SILENT (user: "só anunciar onde dá pra cavar/
+                    // arar"). Finding tilled/plantable spots without a tool is what the "Cultivo"
+                    // target category is for.
+                    content = null;
+                }
+
+                // 1-sample debounce: require the (tile,content) to persist across two scans before
+                // announcing, so the transient tile during a turn+step isn't spoken (one announce
+                // per turn/step, not two).
+                if (frontTile != _pendingFrontTile || content != _pendingFrontContent)
+                {
+                    _pendingFrontTile = frontTile;
+                    _pendingFrontContent = content;
+                    return;
+                }
+
+                if (frontTile == _lastFrontTile && content == _lastFrontContent) return;
+                _lastFrontTile = frontTile;
+                _lastFrontContent = content;
+                if (!string.IsNullOrEmpty(content))
+                {
+                    // interrupt so a new tile replaces the previous line instead of queueing behind
+                    // it (user: "fala um lugar e outro ao mesmo tempo") - the latest tile is what
+                    // matters while walking/working.
+                    ScreenReader.Say(content, interrupt: true);
+                    if (Main.DebugMode) DebugLogger.LogState($"ToolAim: front={frontTile} content=\"{content}\"");
+                }
+            }
+            catch { }
+        }
+
+        // The interactable content of the tile ahead, chained (a tile can be several things at once
+        // - GroundType is a [Flags] enum, plus FertileSoil/crop overlays and objects on top). Tool-
+        // independent. Returns null when nothing interactable is there.
+        private string DescribeFrontTile(Vector3 frontPos)
+        {
+            var parts = new System.Collections.Generic.List<string>();
+            // Only announce the GROUND on USEFUL (farmable) tiles - the plot where you can dig/till/
+            // plant. On non-farmable ground (paths, random grass, floors) stay silent (user: "somente
+            // telhas úteis: terra que dá pra cavar/plantar, ou grama que dá pra foiçar/cavar").
+            string ground = UsefulGroundName(frontPos);
+            if (!string.IsNullOrEmpty(ground) && WorldGrid.LKBLKCFOEPA(frontPos)) parts.Add(ground.ToLowerInvariant());
+            try
+            {
+                var fs = WorldGrid.MMIIIKBJKBA<FertileSoil>(frontPos);
+                if (fs != null && fs.plantedCropSetter != null) parts.Add("planta");
+            }
+            catch { }
+            string obj = NearestFrontObjectName(frontPos);
+            if (!string.IsNullOrEmpty(obj)) parts.Add(obj);
+            return parts.Count == 0 ? null : string.Join(", ", parts);
+        }
+
+        // Nearest interactable object (tree / rock-mineral / harvestable) to the tile ahead.
+        private string NearestFrontObjectName(Vector3 frontPos)
+        {
+            float best = FrontObjectRadius; string name = null;
+            foreach (var t in _cachedTrees)
+            {
+                if (t == null) continue;
+                float d = Vector3.Distance(frontPos, t.gameObject.transform.position);
+                if (d >= best) continue;
+                best = d;
+                var pl = t.GetComponent<Placeable>();
+                name = pl != null ? DescribePlaceable(pl) : CleanSceneObjectName(t.gameObject.name);
+            }
+            foreach (var m in _cachedMiscHarvests)
+            {
+                if (m == null) continue;
+                float d = Vector3.Distance(frontPos, m.gameObject.transform.position);
+                if (d >= best) continue;
+                best = d;
+                name = m.harvestedItems.item != null ? ItemDisplayName(m.harvestedItems.item) : CleanSceneObjectName(m.gameObject.name);
+            }
+            foreach (var h in _cachedHarvestables)
+            {
+                if (h == null) continue;
+                float d = Vector3.Distance(frontPos, h.gameObject.transform.position);
+                if (d >= best) continue;
+                best = d;
+                name = (h.harvestedItems != null && h.harvestedItems.Length > 0 && h.harvestedItems[0].item != null)
+                    ? ItemDisplayName(h.harvestedItems[0].item) : CleanSceneObjectName(h.gameObject.name);
+            }
+            return name;
+        }
+
+        // [56-61] The farm-tile states have NO game-provided name (confirmed via research) - the
+        // game only localizes the verbs (Plantar/Cavar/Regar). So when a farming action prompt
+        // shows, we name the GROUND ourselves from the tile state, instead of letting whatever
+        // Placeable the proximity system focused (e.g. a foundry placed on the plot) supply the
+        // name -> that was the "Fundição: Plantar" bug.
+        public static string GroundStateName(Vector3 pos)
+        {
+            try
+            {
+                if (WorldGrid.MMIIIKBJKBA<FertileSoil>(pos) != null) return "Terra arada";
+                if (WorldGrid.MMIIIKBJKBA<HoleInGround>(pos) != null) return "Pequeno buraco";
+                if (WorldGrid.GCGNCHFNEBJ(pos, out var tile)) return TerrainName(tile);
+            }
+            catch { }
+            return null;
+        }
+
+        private static string TerrainName(WorldTile tile)
+        {
+            if (tile.hasSnow) return "Neve";
+            var gt = tile.groundType;
+            if (gt.HasFlag(GroundType.TilledEarth)) return "Terra arada";
+            if (gt.HasFlag(GroundType.Grass)) return "Grama";
+            if (gt.HasFlag(GroundType.Sand)) return "Areia";
+            if (gt.HasFlag(GroundType.Stone)) return "Pedra";
+            if (gt.HasFlag(GroundType.Floor))
+                return tile.materialType == MaterialType.Wood ? "Piso de madeira"
+                    : tile.materialType == MaterialType.Stone ? "Piso de pedra" : "Piso";
+            if (gt.HasFlag(GroundType.Ground)) return "Terra";
+            return null;
+        }
+
+        // [55] Announce the resource/tree/animal that is ON the player's CURRENT tile - one per
+        // step, only the one matching the tile you're standing on (not a radius sweep). Gated on
+        // tile change so it's cheap (no per-frame scanning) and has no lag.
+        private void HandleNearbyResourceAnnouncement()
+        {
+            // While a farming tool is in hand, the tool-aim announcement owns the feedback - the
+            // per-tile resource callout ("erva alta") on top of "grama, dá pra cavar" was noise
+            // (user: "ainda diz erva alta, depois diz grama").
+            if (IsGroundTool(ClassifyHeldTool())) return;
+
+            Vector3 pos = PlayerController.GetPlayerPosition(1);
+            var tile = new Vector2Int(Mathf.RoundToInt(pos.x / TileSize), Mathf.RoundToInt(pos.y / TileSize));
+            if (tile == _lastResourceTile) return;
+            _lastResourceTile = tile;
+
+            // Only consider things essentially on this tile (within ~one tile).
+            float bestDist = TileSize * 1.2f;
+            string bestName = null;
+            void Consider(GameObject go, string name)
+            {
+                if (go == null || string.IsNullOrEmpty(name)) return;
+                float d = Vector3.Distance(pos, go.transform.position);
+                if (d < bestDist) { bestDist = d; bestName = name; }
+            }
+
+            foreach (var h in _cachedHarvestables)
+            {
+                if (h == null) continue;
+                string nm = (h.harvestedItems != null && h.harvestedItems.Length > 0 && h.harvestedItems[0].item != null)
+                    ? ItemDisplayName(h.harvestedItems[0].item) : CleanSceneObjectName(h.gameObject.name);
+                Consider(h.gameObject, nm);
+            }
+            foreach (var m in _cachedMiscHarvests)
+            {
+                if (m == null) continue;
+                string nm = m.harvestedItems.item != null ? ItemDisplayName(m.harvestedItems.item) : CleanSceneObjectName(m.gameObject.name);
+                Consider(m.gameObject, nm);
+            }
+            foreach (var t in _cachedTrees)
+            {
+                if (t == null) continue;
+                var pl = t.GetComponent<Placeable>();
+                string nm = pl != null ? DescribePlaceable(pl) : CleanSceneObjectName(t.gameObject.name);
+                Consider(t.gameObject, nm);
+            }
+            foreach (var a in _cachedAnimals)
+            {
+                if (a == null) continue;
+                Consider(a.gameObject, DescribeNpc(a));
+            }
+
+            if (bestName != null)
+            {
+                ScreenReader.Say(bestName, interrupt: false);
+                if (Main.DebugMode) DebugLogger.LogState($"WorldNav: Tile resource announced \"{bestName}\" dist={bestDist:F1}");
+            }
+        }
+
         private void HandleItemProximitySounds()
         {
             if (Time.unscaledTime - _lastItemSoundCycleTime < ItemSoundCycleInterval) return;
@@ -1315,7 +2348,13 @@ namespace TravellersRestAccess
             {
                 if (zone == null) continue;
                 if (Vector3.Distance(playerPos, zone.transform.position) > NearbyDoorRadius) continue;
-                list.Add((DescribeTravelZone(zone), zone.transform.position, "Portas"));
+                // Route to a WALKABLE approach point, not the zone's raw center. Confirmed in
+                // the city log: "Passagem para a taverna da cidade" got "sem rota ainda" every
+                // frame (A* never reached the goal) and the straight-line fallback walked the
+                // player into a wall - the trigger's center sits inside non-walkable geometry.
+                // GetApproachPosition nudges the goal to just outside the zone's collider on
+                // the player's side, which A* can actually reach.
+                list.Add((DescribeTravelZone(zone), GetApproachPosition(zone.gameObject, playerPos), "Portas"));
             }
 
             // Round 107: bed was added unconditionally, so it showed even in the cellar ("a cama
@@ -1336,11 +2375,38 @@ namespace TravellersRestAccess
                     list.Add(("Cama", bedTarget, "Decorativos"));
             }
 
+            // User's explicit request (rodada 134f): NPCs (townspeople, the cat, etc.) as
+            // navigable targets under their own "NPCs" category, named as the game names them
+            // ("os npc estão todos sem nome, quero os nomeado de acordo com o q o jogo diz").
+            // They all share the NPC base: DialogueNPCBase for dialogue characters (which
+            // carries actorName/characterName), CatNPC for the cat (named by GameObject name).
+            foreach (var npc in Object.FindObjectsOfType<NPC>())
+            {
+                if (npc == null) continue;
+                if (Vector3.Distance(playerPos, npc.transform.position) > NearbyDoorRadius) continue;
+                // Skip ambient/utility "NPCs" (door openers, buzzing flies, movers) that aren't
+                // real characters - same ones DialogueAnnouncer filters out of narration.
+                string rawNpc = npc.gameObject.name;
+                if (rawNpc.Contains("Door") || rawNpc.Contains("Buzz") || rawNpc.Contains("Mudanza")) continue;
+                string npcName = DescribeNpc(npc);
+                if (string.IsNullOrEmpty(npcName)) continue;
+                list.Add((npcName, GetApproachPosition(npc.gameObject, playerPos), "NPCs"));
+            }
+
             // User's explicit request: all items nearby too, same "by proximity" rule as
             // doors.
             foreach (var placeable in Object.FindObjectsOfType<Placeable>())
             {
                 if (Vector3.Distance(playerPos, placeable.transform.position) > NearbyDoorRadius) continue;
+
+                // Confirmed in the test log (real bug, not a guess): the player's bed is ALSO
+                // a Placeable, so this loop added it a SECOND time as "Cama do jogador" (its
+                // localized name) pointing at GetApproachPosition - the bed's EDGE, not the
+                // sleepCollider center where the "Quer dormir?" prompt actually fires. The
+                // user picked that wrong entry, so the route led beside the bed and the sleep
+                // prompt never triggered. Skip the bed here; the dedicated "Cama" entry above
+                // already lists it with the correct sleepCollider target.
+                if (Bed.instance != null && placeable == Bed.instance.placeable) continue;
 
                 // Confirmed live: at least one Placeable ("BarManager") has no visual
                 // representation at all - a manager script, not a real physical object -
@@ -1348,7 +2414,10 @@ namespace TravellersRestAccess
                 // anything with nothing to actually look at.
                 if (placeable.GetComponent<SpriteRenderer>() == null) continue;
 
-                list.Add((DescribePlaceable(placeable), GetApproachPosition(placeable.gameObject, playerPos), CategorizePlaceable(placeable)));
+                string pName = DescribePlaceable(placeable);
+                string broken = CrafterBrokenSuffix(placeable);
+                if (!string.IsNullOrEmpty(broken)) pName += broken;
+                list.Add((pName, GetApproachPosition(placeable.gameObject, playerPos), CategorizePlaceable(placeable)));
             }
 
             // Round 112: the food prep table (NinjaPreparationTable) is its OWN MonoBehaviour, not
@@ -1360,6 +2429,87 @@ namespace TravellersRestAccess
                 if (prep == null || Vector3.Distance(playerPos, prep.transform.position) > NearbyDoorRadius) continue;
                 list.Add(("Mesa de preparação", GetApproachPosition(prep.gameObject, playerPos), "Máquinas"));
             }
+
+            // Well: IInteractable/IHoverable/IProximity, not a Placeable - scan separately.
+            // User: "o poço deve aparecer em categoria de máquinas".
+            foreach (var well in Object.FindObjectsOfType<Well>())
+            {
+                if (well == null || Vector3.Distance(playerPos, well.transform.position) > NearbyDoorRadius) continue;
+                list.Add(("Poço", GetApproachPosition(well.gameObject, playerPos), "Máquinas"));
+            }
+
+            // Harvestable resources (trees, herbs, crops) and MiscellaneousHarvest (stones, minerals,
+            // misc pickups) - user: "arvores deve aparecer em categoria materiais, assim como pedras,
+            // ou qualquer outro minerio".
+            foreach (var harv in Object.FindObjectsOfType<Harvestable>())
+            {
+                if (harv == null || Vector3.Distance(playerPos, harv.transform.position) > NearbyDoorRadius) continue;
+                string harvName = null;
+                if (harv.harvestedItems != null && harv.harvestedItems.Length > 0 && harv.harvestedItems[0].item != null)
+                    harvName = ItemDisplayName(harv.harvestedItems[0].item);
+                // Last resort: the harvestable's own cleaned GameObject name (e.g. "2001 - Roble"
+                // -> "Roble"/"Carvalho") instead of the generic "Recurso".
+                if (string.IsNullOrEmpty(harvName)) harvName = CleanSceneObjectName(harv.gameObject.name);
+                if (string.IsNullOrEmpty(harvName)) harvName = "Recurso";
+                list.Add((harvName, GetApproachPosition(harv.gameObject, playerPos), "Materiais"));
+            }
+            foreach (var misc in Object.FindObjectsOfType<MiscellaneousHarvest>())
+            {
+                if (misc == null || Vector3.Distance(playerPos, misc.transform.position) > NearbyDoorRadius) continue;
+                string miscName = null;
+                if (misc.harvestedItems.item != null)
+                    miscName = ItemDisplayName(misc.harvestedItems.item);
+                if (string.IsNullOrEmpty(miscName)) miscName = CleanSceneObjectName(misc.gameObject.name);
+                if (string.IsNullOrEmpty(miscName)) miscName = "Recurso";
+                list.Add((miscName, GetApproachPosition(misc.gameObject, playerPos), "Materiais"));
+            }
+
+            // Trees (axe) and rocks/ore incl. coal (pickaxe) - user: "carvões e outros minerais não
+            // aparecem". These are Tree/Rock objects (NOT Harvestable/MiscellaneousHarvest), so the
+            // loops above missed them. Approach + face + F chops/mines them (the tool auto-walks).
+            foreach (var tree in Object.FindObjectsOfType<Tree>())
+            {
+                if (tree == null || Vector3.Distance(playerPos, tree.transform.position) > NearbyDoorRadius) continue;
+                string nm = DroppedName(tree.droppedItems != null && tree.droppedItems.Length > 0 ? tree.droppedItems[0].item : null)
+                    ?? CleanSceneObjectName(tree.gameObject.name);
+                if (string.IsNullOrEmpty(nm)) nm = "Árvore";
+                list.Add(($"Árvore, {nm}", GetApproachPosition(tree.gameObject, playerPos), "Materiais"));
+            }
+            foreach (var rock in Object.FindObjectsOfType<Rock>())
+            {
+                if (rock == null || Vector3.Distance(playerPos, rock.transform.position) > NearbyDoorRadius) continue;
+                // Name a rock by what it drops (coal/stone/ore) so "Carvão" shows for the coal step.
+                string nm = DroppedName(rock.droppedItems != null && rock.droppedItems.Length > 0 ? rock.droppedItems[0].item : null)
+                    ?? CleanSceneObjectName(rock.gameObject.name);
+                if (string.IsNullOrEmpty(nm)) nm = "Pedra";
+                list.Add((nm, GetApproachPosition(rock.gameObject, playerPos), "Materiais"));
+            }
+
+            // "Cultivo": tilled/planted tiles the player wants to find (plant/water/harvest). Each
+            // tilled tile is a FertileSoil MonoBehaviour placed when you hoe the ground. Empty bed
+            // (plantedCropSetter == null) -> "Terra arada"; with a crop -> "Planta". The per-type
+            // collapse below turns these into one entry per kind with a count, guiding to the nearest
+            // and then the next nearest. Rebuilt fresh each time the list is opened, so it updates as
+            // tiles are tilled/planted/cleared.
+            // No distance filter here (unlike Materiais): the player wants to find ALL their farm
+            // tiles, even the far ones (user: "plantei 9, só mostram 7" - the far/planted ones were
+            // dropped). FertileSoil only exists where they tilled, so listing all is fine. State is
+            // spelled out so a screen-reader player knows what to do: dry soil needs watering before
+            // planting; watered soil is ready to plant.
+            foreach (var fs in Object.FindObjectsOfType<FertileSoil>())
+            {
+                if (fs == null) continue;
+                string fsName = fs.plantedCropSetter != null ? "Planta"
+                    : fs.daysUntilDry > 1 ? "Terra arada molhada"
+                    : "Terra arada seca";
+                list.Add((fsName, GetApproachPosition(fs.gameObject, playerPos), "Cultivo"));
+            }
+
+            // RAW arable tiles (no object exists for them - scan the 0.5 grid). "Pra arar" = a tile
+            // the hoe would till right now (the game's own predicate, incl. the miolo/neighbour +
+            // weed rules); "Pra cavar" = farmable grass to spade into bare ground first. The per-type
+            // collapse turns these into one guided entry each with a count.
+            ScanArableTiles(playerPos, list);
 
             // User's explicit request: floor stains from the cleaning tutorial goal
             // ("Limpe as manchas do chão") weren't in the list at all - confirmed in
@@ -1472,7 +2622,35 @@ namespace TravellersRestAccess
                 bool isDuplicate = deduped.Any(d => d.category == entry.category && Vector3.Distance(d.position, entry.position) < TileSize);
                 if (!isDuplicate) deduped.Add(entry);
             }
-            return deduped;
+
+            // User [79][80][81]: resources/collectibles are too many to navigate one by one.
+            // Collapse each TYPE (same name) in Materiais/Coletáveis into a SINGLE entry placed
+            // at the NEAREST instance, with a count ("Carvalho (5 perto)"). Tracking then routes
+            // to the nearest; after you collect it, the next rebuild picks the next nearest.
+            var grouped = new List<(string name, Vector3 position, string category)>();
+            var resourceGroups = new Dictionary<string, (Vector3 pos, float dist, int count)>();
+            var groupOrder = new List<string>();
+            foreach (var entry in deduped)
+            {
+                if (entry.category == "Materiais" || entry.category == "Coletáveis" || entry.category == "Cultivo")
+                {
+                    string key = entry.category + "|" + entry.name;
+                    float d = Vector3.Distance(playerPos, entry.position);
+                    if (!resourceGroups.TryGetValue(key, out var g)) { resourceGroups[key] = (entry.position, d, 1); groupOrder.Add(key); }
+                    else resourceGroups[key] = (d < g.dist ? entry.position : g.pos, Mathf.Min(d, g.dist), g.count + 1);
+                }
+                else grouped.Add(entry);
+            }
+            foreach (var key in groupOrder)
+            {
+                var g = resourceGroups[key];
+                int sep = key.IndexOf('|');
+                string cat = key.Substring(0, sep);
+                string nm = key.Substring(sep + 1);
+                string label = g.count > 1 ? $"{nm} ({g.count} perto)" : nm;
+                grouped.Add((label, g.pos, cat));
+            }
+            return grouped;
         }
 
         private static float _lastSeatSlotDiagLogTime;
@@ -2385,6 +3563,168 @@ namespace TravellersRestAccess
             return null;
         }
 
+        // Names an NPC the way the game does. DialogueNPCBase carries the actor/character
+        // name; the cat and any plain NPC fall back to a cleaned GameObject name.
+        private static string DescribeNpc(NPC npc)
+        {
+            if (npc is DialogueNPCBase dlg)
+            {
+                if (!string.IsNullOrWhiteSpace(dlg.actorName)) return dlg.actorName.Trim();
+                if (dlg.characterName != CharacterName.None) return dlg.characterName.ToString();
+            }
+            // Fallback: the GameObject name is usually the character's own name (e.g. "Bob",
+            // "BobNPC", "Cat") - clean it up the same way scenery names are cleaned.
+            return CleanSceneObjectName(npc.gameObject.name);
+        }
+
+        // Shared name cleanup for raw GameObject names (scenery + NPC fallbacks): strips the
+        // engine's "(Clone)", " Variant", trailing " (N)" duplicate-index, a leading "NN - "
+        // numeric prefix and a trailing "NPC", collapses the "Destructible ..." scenery family
+        // into one readable label, then applies the Spanish->Portuguese translation table.
+        private static string CleanSceneObjectName(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return raw;
+            string name = raw;
+
+            // Whole "Destructible Outside 4 Variant (6)" family -> one readable name.
+            if (name.StartsWith("Destructible", System.StringComparison.OrdinalIgnoreCase))
+                return "Objeto destrutível";
+
+            // Underscores are word separators in asset names ("City_Plaque" -> "City Plaque").
+            name = name.Replace('_', ' ').Trim();
+
+            if (name.EndsWith("(Clone)")) name = name.Substring(0, name.Length - "(Clone)".Length).Trim();
+
+            // Strip a leading "1125 - " style numeric prefix.
+            int dashIndex = name.IndexOf(" - ");
+            if (dashIndex >= 0 && int.TryParse(name.Substring(0, dashIndex), out _))
+                name = name.Substring(dashIndex + 3).Trim();
+
+            // Strip a trailing " (3)" duplicate index and a " Variant" suffix.
+            name = System.Text.RegularExpressions.Regex.Replace(name, @"\s*\(\d+\)\s*$", "").Trim();
+            if (name.EndsWith(" Variant")) name = name.Substring(0, name.Length - " Variant".Length).Trim();
+
+            // Strip a trailing "NPC" so prefab names like "BobNPC" read as "Bob".
+            if (name.EndsWith("NPC")) name = name.Substring(0, name.Length - "NPC".Length).Trim();
+
+            if (FallbackNameTranslations.TryGetValue(name, out var translated)) name = translated;
+            return name;
+        }
+
+        // Best display name for an Item (rodada 134Y - based on deep code research). Uses the
+        // game's localized name; when that's MISSING (the method returns the raw asset name,
+        // i.e. == item.name), falls back to a Portuguese CATEGORY word from the item's type
+        // (Tool subclass / Food.ingredientType / Item.category) instead of "Recurso" or a raw
+        // Spanish code. This means every item reads as at least a correct category.
+        // If this placeable is a BROKEN machine (Crafter), a suffix telling the player it needs
+        // repair + the cost, so the tutorial "conserte a serraria" is discoverable. Broken = the
+        // machine's item id maps to a `Crafter.*Repaired` static flag that is still false
+        // (Crafter.cs:2674 AIIELPDNAPP, flags at :212). Repair itself is the normal Interact on it
+        // (opens a Yes/No "quer consertar?" dialogue).
+        private static string CrafterBrokenSuffix(Placeable placeable)
+        {
+            try
+            {
+                if (placeable.GetComponent<Crafter>() == null) return null;
+                int id = placeable.itemSetup.item.JDJGFAACPFC();
+                if (Main.DebugMode) DebugLogger.LogState($"CrafterBroken check: id={id} name=\"{placeable.gameObject.name}\" sawmillRepaired={Crafter.sawmillRepaired}");
+                bool broken;
+                string cost;
+                switch (id)
+                {
+                    case 703: broken = !Crafter.sawmillRepaired; cost = "10 madeira"; break;
+                    case 704: broken = !Crafter.smelterRepaired; cost = "5 tábuas e 5 pedra"; break;
+                    case 706: broken = !Crafter.stoneWorkstationRepaired; cost = "4 pregos e 5 pedra"; break;
+                    case 723: broken = !Crafter.stumpRepaired; cost = "5 madeira"; break;
+                    case 728: broken = !Crafter.blacksmithsTableRepaired; cost = "4 barras de ferro e 5 pedra"; break;
+                    default: return null;
+                }
+                return broken ? $", quebrada, conserte interagindo ({cost})" : null;
+            }
+            catch { return null; }
+        }
+
+        // Localized name of the item a tree/rock drops, or null. Labels a coal rock "Carvão", etc.
+        private static string DroppedName(Item item)
+        {
+            try { return item != null ? ItemDisplayName(item) : null; }
+            catch { return null; }
+        }
+
+        public static string ItemDisplayName(Item item)
+        {
+            if (item == null) return null;
+            string raw = null;
+            try { raw = item.IABAKHPEOAF(); } catch { }
+            bool translationMissing = string.IsNullOrEmpty(raw) || raw == item.name;
+            string cleaned = CleanSceneObjectName(raw);
+
+            // Real translation, or our scenery table improved it (e.g. Roble->Carvalho): use it.
+            if (!translationMissing && !string.IsNullOrEmpty(cleaned)) return cleaned;
+            if (!string.IsNullOrEmpty(cleaned) && FallbackNameTranslations.ContainsValue(cleaned)) return cleaned;
+
+            string cat = CategoryWord(item);
+            if (!string.IsNullOrEmpty(cat)) return cat;
+            return !string.IsNullOrEmpty(cleaned) ? cleaned : "Item";
+        }
+
+        private static string CategoryWord(Item item)
+        {
+            try
+            {
+                if (item is Tool)
+                {
+                    if (item is Pick) return "Picareta";
+                    if (item is Mop) return "Esfregão";
+                    if (item is Ax) return "Machado";
+                    if (item is Sickle) return "Foice";
+                    if (item is Rod) return "Vara de pesca";
+                    if (item is Hoe) return "Enxada";
+                    if (item is Spade) return "Pá";
+                    if (item is WateringCan) return "Regador";
+                    return "Ferramenta";
+                }
+                if (item is Food food && food.ingredientType != IngredientType.None)
+                {
+                    switch (food.ingredientType)
+                    {
+                        case IngredientType.Meat: return "Carne";
+                        case IngredientType.Veg: return "Vegetal";
+                        case IngredientType.Fruit: return "Fruta";
+                        case IngredientType.Herb: return "Erva";
+                        case IngredientType.Mushroom: return "Cogumelo";
+                        case IngredientType.Grain: return "Cereal";
+                        case IngredientType.Flour: return "Farinha";
+                        case IngredientType.Berries: return "Frutos silvestres";
+                        case IngredientType.Nuts: return "Frutos secos";
+                        case IngredientType.Legumes:
+                        case IngredientType.Bean: return "Legume";
+                        case IngredientType.Cheese: return "Queijo";
+                        case IngredientType.Honey: return "Mel";
+                        case IngredientType.Hop: return "Lúpulo";
+                        case IngredientType.WhiteFish:
+                        case IngredientType.BlueFish: return "Peixe";
+                        case IngredientType.Shellfish: return "Marisco";
+                        case IngredientType.Seed: return "Semente";
+                    }
+                }
+                switch (item.category)
+                {
+                    case Category.Nature: return "Recurso natural";
+                    case Category.Farming: return "Item de cultivo";
+                    case Category.Food: return "Comida";
+                    case Category.Brewing: return "Bebida";
+                    case Category.Tools: return "Ferramenta";
+                    case Category.Furniture: return "Mobília";
+                    case Category.Decorations: return "Decoração";
+                    case Category.Lighting: return "Iluminação";
+                    case Category.Cosmetic: return "Cosmético";
+                }
+            }
+            catch { }
+            return null;
+        }
+
         private static string DescribePlaceable(Placeable placeable)
         {
             // Round 113: name the drink stations explicitly (before the itemSetup name, which is
@@ -2401,7 +3741,7 @@ namespace TravellersRestAccess
             // mop - to wrongly report empty/"Vazio" elsewhere). IABAKHPEOAF() already knows
             // about that and falls back to the raw asset name if no translation exists.
             string itemName = placeable.itemSetup != null && placeable.itemSetup.item != null
-                ? placeable.itemSetup.item.IABAKHPEOAF()
+                ? ItemDisplayName(placeable.itemSetup.item)
                 : null;
             if (!string.IsNullOrEmpty(itemName))
             {
@@ -2409,21 +3749,13 @@ namespace TravellersRestAccess
                 return itemName;
             }
 
-            string name = placeable.gameObject.name;
-            if (name.EndsWith("(Clone)")) name = name.Substring(0, name.Length - "(Clone)".Length).Trim();
-
-            int dashIndex = name.IndexOf(" - ");
-            if (dashIndex >= 0 && int.TryParse(name.Substring(0, dashIndex), out _))
-            {
-                name = name.Substring(dashIndex + 3).Trim();
-            }
-
             // Confirmed in the log: every object without itemSetup.item is pure scenery
             // with no Item/localization data at all - its GameObject name IS the dev's
-            // original asset name, in Spanish (this game's source assets are Spanish-named
-            // even though displayed Item text is localized). Translating the SPECIFIC
-            // Spanish names actually observed live, not guessing a general dictionary.
-            if (FallbackNameTranslations.TryGetValue(name, out var translated)) name = translated;
+            // original asset name, in Spanish/English (e.g. "Felpudo Exterior", "Cherry Old",
+            // "Destructible Outside 4 Variant (6)"). CleanSceneObjectName strips the engine
+            // cruft and applies the Spanish->Portuguese table; user reported these as the
+            // "placas e objetos com nomes estranhos".
+            string name = CleanSceneObjectName(placeable.gameObject.name);
 
             if (Main.DebugMode) DebugLogger.LogState($"WorldNav: Item name fallback (no itemSetup.item): \"{name}\" (GameObject=\"{placeable.gameObject.name}\")");
             return name;
@@ -2448,7 +3780,50 @@ namespace TravellersRestAccess
             { "Cama del Jugador", "Cama do Jogador" },
             { "Barril de Servicio", "Barril de Serviço" },
             { "Cellar Door", "Porta do Porão" },
+            // Rodada 134f: untranslated scenery names confirmed in the test log.
+            { "Felpudo Exterior", "Capacho" },
+            { "Cherry Old", "Cerejeira" },
+            { "Taberna", "Taverna" },
+            // Rodada 134h: names confirmed in the city interaction-prompt log.
+            { "City Plaque", "Placa da cidade" },
+            { "Post Box", "Caixa de correio" },
+            // Rodada 134W: resource/collectible raw asset names (Spanish) confirmed in log.
+            { "Roble", "Carvalho" },
+            { "Castaño", "Castanheiro" },
         };
+
+        // Post Box letter reading (user: the mail menu read only the dates and "Voltar", never
+        // the letter itself). PostboxUI shows the opened letter in private fields letterSubject
+        // and letterTextBig (the body) - read via reflection. Announced once per letter change.
+        private static readonly System.Reflection.FieldInfo PostboxSubjectField =
+            typeof(PostboxUI).GetField("letterSubject", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        private static readonly System.Reflection.FieldInfo PostboxBodyField =
+            typeof(PostboxUI).GetField("letterTextBig", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        private string _lastPostboxLetter;
+
+        private void HandlePostboxAnnouncement()
+        {
+            PostboxUI pb;
+            try { pb = PostboxUI.ODLPIANFFFJ(1); }
+            catch { return; }
+            if (pb == null || !pb.IsOpen() || PostboxBodyField == null)
+            {
+                _lastPostboxLetter = null;
+                return;
+            }
+
+            var bodyLabel = PostboxBodyField.GetValue(pb) as TMPro.TMP_Text;
+            string body = bodyLabel != null ? UITextExtractor.GetReadableText(bodyLabel) : null;
+            if (string.IsNullOrEmpty(body)) { _lastPostboxLetter = null; return; }
+            if (body == _lastPostboxLetter) return; // same letter still open - don't repeat
+            _lastPostboxLetter = body;
+
+            var subjectLabel = PostboxSubjectField?.GetValue(pb) as TMPro.TMP_Text;
+            string subject = subjectLabel != null ? UITextExtractor.GetReadableText(subjectLabel) : null;
+            string msg = string.IsNullOrEmpty(subject) ? body : $"{subject}. {body}";
+            ScreenReader.Say(msg, interrupt: true);
+            if (Main.DebugMode) DebugLogger.LogState($"WorldNav: Postbox letter read, subject=\"{subject}\"");
+        }
 
         private void HandleFloorDirtAnnouncement()
         {
@@ -2498,6 +3873,13 @@ namespace TravellersRestAccess
         // derived from the shared _cachedAllPlaceables scan instead of its own pass.
         private Placeable[] _cachedCandles = new Placeable[0];
 
+        // Well (MonoBehaviour, not Placeable) proximity sound — refreshed on the same
+        // AllPlaceablesInterval cadence as the main placeable cache.
+        private Well[] _cachedWells = new Well[0];
+        private const float WellSoundRadius = 5f;
+        private float _lastWellSoundTime = -999f;
+        private const float WellSoundInterval = 3f;
+
         // Round 113: ONE cached scan of all Placeables, shared by the candle proximity AND the
         // item-proximity sounds. HandleItemProximitySounds was doing its OWN FindObjectsOfType<
         // Placeable> EVERY second (~87ms spike per second - a major continuous stutter and the real
@@ -2505,6 +3887,15 @@ namespace TravellersRestAccess
         private Placeable[] _cachedAllPlaceables = new Placeable[0];
         private float _lastAllPlaceablesTime = -999f;
         private const float AllPlaceablesInterval = 15f;
+
+        // Ambient proximity announcement [82] (user chose option "a": announce each new
+        // resource/tree/animal as you pass). Cached scans + a "already announced" set with
+        // hysteresis (forget when you walk away, so re-approaching re-announces).
+        private Harvestable[] _cachedHarvestables = new Harvestable[0];
+        private MiscellaneousHarvest[] _cachedMiscHarvests = new MiscellaneousHarvest[0];
+        private Tree[] _cachedTrees = new Tree[0];
+        private AnimalNPC[] _cachedAnimals = new AnimalNPC[0];
+        private Vector2Int _lastResourceTile = new Vector2Int(int.MinValue, int.MinValue);
 
         private void RefreshSeatSceneCache()
         {
@@ -2519,7 +3910,15 @@ namespace TravellersRestAccess
                 _cachedCandles = _cachedAllPlaceables
                     .Where(p => p != null && p.itemSetup != null && p.itemSetup.item != null && p.itemSetup.item.JDJGFAACPFC() == CandleItemId)
                     .ToArray();
-                if (swc != null && swc.ElapsedMilliseconds > 3) DebugLogger.LogState($"WorldNav: PERF placeable scan took {swc.ElapsedMilliseconds}ms ({_cachedAllPlaceables.Length} placeables, {_cachedCandles.Length} candles)");
+                _cachedWells = Object.FindObjectsOfType<Well>();
+                // Ambient proximity announcement [82]: cache resource/tree/animal scans here
+                // (same 15s interval) so the per-tick proximity check is just distance math, not
+                // a full-scene FindObjectsOfType (which caused stutter before).
+                _cachedHarvestables = Object.FindObjectsOfType<Harvestable>();
+                _cachedMiscHarvests = Object.FindObjectsOfType<MiscellaneousHarvest>();
+                _cachedTrees = Object.FindObjectsOfType<Tree>();
+                _cachedAnimals = Object.FindObjectsOfType<AnimalNPC>();
+                if (swc != null && swc.ElapsedMilliseconds > 3) DebugLogger.LogState($"WorldNav: PERF placeable scan took {swc.ElapsedMilliseconds}ms ({_cachedAllPlaceables.Length} placeables, {_cachedCandles.Length} candles, {_cachedWells.Length} wells)");
             }
 
             if (Time.unscaledTime - _lastSeatSceneCacheTime < SeatSceneCacheInterval) return;
@@ -2549,6 +3948,8 @@ namespace TravellersRestAccess
         private readonly System.Collections.Generic.HashSet<Customer> _customerOrderAnnounced =
             new System.Collections.Generic.HashSet<Customer>();
         private float _lastTavernServiceCheck;
+        private bool _tavernOpenInitialized;
+        private bool _lastTavernOpen;
 
         private static string CustomerWantWord(Customer c)
         {
@@ -2692,6 +4093,34 @@ namespace TravellersRestAccess
                     ScreenReader.Say(served ? "Cliente saiu satisfeito" : "Cliente saiu insatisfeito", interrupt: false);
                 }
             }
+        }
+
+        private void HandleQuickSave()
+        {
+            if (!Input.GetKeyDown(KeyCode.S)) return;
+            if (!Input.GetKey(KeyCode.LeftControl) && !Input.GetKey(KeyCode.RightControl)) return;
+            var saveUI = SaveUI.instance;
+            if (saveUI == null) return;
+            saveUI.AutoSave();
+            ScreenReader.Say("Jogo salvo", interrupt: true);
+            if (Main.DebugMode) DebugLogger.LogState("QuickSave: AutoSave called");
+        }
+
+        private void HandleTavernOpenClose()
+        {
+            var tm = TavernManager.GGFJGHHHEJC;
+            if (tm == null) return;
+            bool open = tm.LKOJBFMGMAE;
+            if (!_tavernOpenInitialized)
+            {
+                _tavernOpenInitialized = true;
+                _lastTavernOpen = open;
+                return;
+            }
+            if (open == _lastTavernOpen) return;
+            _lastTavernOpen = open;
+            ScreenReader.Say(open ? "Taverna aberta" : "Taverna fechada", interrupt: true);
+            if (Main.DebugMode) DebugLogger.LogState($"TavernOpenClose: tavern is now {(open ? "open" : "closed")}");
         }
 
         // Round 119: serve a waiting customer WITHOUT walking to them - Z serves food, X serves
@@ -3008,6 +4437,63 @@ namespace TravellersRestAccess
             ScreenReader.Say(remaining <= 0 ? "Mancha limpa, todas limpas" : $"Mancha limpa, faltam {remaining}", interrupt: true);
         }
 
+        // P key: read the tutorial help popup text (the "Ajuda" button on the GoalsPanel,
+        // activated by Rewired "Objective" action). The game only shows the popup once per phase
+        // opening (guarded by `open` flag), so the screen reader never hears it. Two behaviors:
+        // (1) When the popup becomes visible, read its text automatically.
+        // (2) P re-reads the text; if the popup was open and blocking movement, also closes it.
+        private bool _tutorialPopupWasActive;
+        private bool _pendingReadTutorialPopup;
+
+        private void HandleTutorialHelpKey()
+        {
+            var inst = NewTutorialManager.instance;
+            if (inst == null || inst.mainPopup == null) return;
+            bool popupActive = inst.mainPopup.activeSelf;
+
+            // Auto-read when popup appears.
+            if (popupActive && !_tutorialPopupWasActive)
+            {
+                string text = inst.popupText != null ? inst.popupText.text : null;
+                if (!string.IsNullOrEmpty(text)) ScreenReader.Say(text, interrupt: false);
+                if (Main.DebugMode) DebugLogger.LogState($"WorldNav: tutorial popup appeared, text=\"{text?.Substring(0, System.Math.Min(60, text?.Length ?? 0))}\"");
+            }
+            _tutorialPopupWasActive = popupActive;
+
+            // P: re-read (and close if blocking movement).
+            if (Input.GetKeyDown(KeyCode.P))
+            {
+                if (popupActive)
+                {
+                    // Use GetReadableText (strips <b>/<color=...> rich-text tags) - reading
+                    // popupText.text raw made NVDA speak the literal tags (user: "tagueamentos
+                    // estranhos"). Same fix applied to the next-frame read below.
+                    string text = inst.popupText != null ? UITextExtractor.GetReadableText(inst.popupText) : null;
+                    if (!string.IsNullOrEmpty(text)) ScreenReader.Say(text, interrupt: true);
+                    NewTutorialManager.ClosePopUp();
+                    if (Main.DebugMode) DebugLogger.LogState("WorldNav: P key - re-read and close tutorial popup");
+                }
+                else if (inst.currentTutorialPhase != null)
+                {
+                    // Try to open the popup; read on the next frame after text is set.
+                    NewTutorialManager.ShowPopUp();
+                    _pendingReadTutorialPopup = true;
+                    if (Main.DebugMode) DebugLogger.LogState("WorldNav: P key - called ShowPopUp, will read next frame");
+                }
+                else
+                {
+                    ScreenReader.Say("Sem ajuda para esta fase", interrupt: true);
+                }
+            }
+
+            if (_pendingReadTutorialPopup && popupActive)
+            {
+                string text = inst.popupText != null ? UITextExtractor.GetReadableText(inst.popupText) : null;
+                if (!string.IsNullOrEmpty(text)) ScreenReader.Say(text, interrupt: true);
+                _pendingReadTutorialPopup = false;
+            }
+        }
+
         private void HandleRatAnnouncement()
         {
             var sceneRefs = SceneReferences.GetSceneReferences();
@@ -3065,6 +4551,23 @@ namespace TravellersRestAccess
         }
 
         private Placeable _lastNearCandle;
+
+        private void HandleWellProximitySound()
+        {
+            if (Time.unscaledTime - _lastWellSoundTime < WellSoundInterval) return;
+            if (_cachedWells == null || _cachedWells.Length == 0) return;
+            Vector3 playerPos = PlayerController.GetPlayerPosition(1);
+            foreach (var well in _cachedWells)
+            {
+                if (well == null) continue;
+                if (Vector3.Distance(playerPos, well.transform.position) <= WellSoundRadius)
+                {
+                    _lastWellSoundTime = Time.unscaledTime;
+                    CustomSounds.PlayZoneSound("poço");
+                    return;
+                }
+            }
+        }
 
         // Round 102: user asked to be warned when passing a spent candle and told the remaining
         // amount when passing a still-lit one. The candle is a Crafter (confirmed: Placeable.
@@ -3227,12 +4730,28 @@ namespace TravellersRestAccess
             ZoneType zone = WorldGrid.AGKGGAFFFGM(PlayerController.GetPlayerPosition(1));
             if (zone == _lastZoneType) return;
             _lastZoneType = zone;
-            string name = ZoneTypeName(zone);
-            if (Main.DebugMode) DebugLogger.LogState($"WorldNav: zone changed to {zone} ({name ?? "(silent)"})");
+
+            // Distinguish outdoor pátio from indoor corridors: both are WithoutZone, but
+            // the outside area has Location != Tavern (typically Location.None).
+            var player = PlayerController.GetPlayer(1);
+            Location playerLoc = player != null ? player.LEOIMFNKFGA : Location.None;
+            string name = ZoneTypeName(zone, playerLoc);
+            if (Main.DebugMode) DebugLogger.LogState($"WorldNav: zone changed to {zone} (loc={playerLoc}, name={name ?? "(silent)"})");
+
+            // Zone-transition sounds: each workshop zone + outdoor transition gets a distinct sound.
+            switch (zone)
+            {
+                case ZoneType.WoodWorkshop: CustomSounds.PlayZoneSound("madeira"); break;
+                case ZoneType.MetalWorkshop: CustomSounds.PlayZoneSound("metal"); break;
+                case ZoneType.StoneWorkshop: CustomSounds.PlayZoneSound("pedra"); break;
+                case ZoneType.WithoutZone:
+                    if (playerLoc != Location.Tavern) CustomSounds.PlayZoneSound("porta"); break;
+            }
+
             if (name != null) ScreenReader.Say(name, interrupt: false);
         }
 
-        private static string ZoneTypeName(ZoneType zone)
+        private static string ZoneTypeName(ZoneType zone, Location playerLoc = Location.None)
         {
             switch (zone)
             {
@@ -3246,7 +4765,8 @@ namespace TravellersRestAccess
                 case ZoneType.WoodWorkshop: return "Oficina de madeira";
                 case ZoneType.MetalWorkshop: return "Oficina de metal";
                 case ZoneType.StoneWorkshop: return "Oficina de pedra";
-                case ZoneType.WithoutZone: return "Corredor";
+                case ZoneType.WithoutZone:
+                    return playerLoc == Location.Tavern ? "Corredor" : "Pátio da taverna";
                 default: return null; // None / unmapped - stay silent
             }
         }
@@ -3400,9 +4920,11 @@ namespace TravellersRestAccess
                 return "Cliente";
             }
             if (go.GetComponent<CatNPC>() != null || go.GetComponentInParent<CatNPC>() != null) return "Gato";
-            // Round 120: the "gata" the user reported is actually Mai (MaiNPC, a DialogueNPCBase) -
-            // the log showed go="MaiNPC" falling through to the nearby bar's name. Name her "Mai".
-            if (go.GetComponent<MaiNPC>() != null || go.GetComponentInParent<MaiNPC>() != null) return "Mai";
+            // Rodada 134h: route ANY remaining NPC through the shared namer so townspeople
+            // (RhiaNPC etc.) read as "Rhia" instead of the raw "RhiaNPC". Covers MaiNPC too
+            // (characterName=Mai), so the old per-character special cases aren't needed.
+            var npc = go.GetComponent<NPC>() ?? go.GetComponentInParent<NPC>();
+            if (npc != null) return DescribeNpc(npc);
             return null;
         }
 
@@ -3434,14 +4956,26 @@ namespace TravellersRestAccess
             // (the order item + food/drink) so the player knows what to serve.
             string npcName = DescribeNpc(go);
             // Round 119: NPCs win the NAME over a nearby station the game happened to focus (the cat
-            // near the tap). If the focused object isn't an NPC but an available one is nearby, use it.
+            // near the tap). If the focused object isn't an NPC but an available one is nearby AND
+            // closer to the player, use the NPC. Round 133: guard with distance comparison - the
+            // reverse bug ("dispenser shows cat name") happens when the player is AT the dispenser
+            // and the cat is further away but still IsAvailableByProximity. The NPC should only
+            // win if it's actually closer than the focused object.
             if (npcName == null)
             {
                 var npcGo = FindClosestAvailableNpc();
-                if (npcGo != null) { go = npcGo; npcName = DescribeNpc(go); }
+                if (npcGo != null)
+                {
+                    Vector3 pPos = PlayerController.GetPlayerPosition(1);
+                    float npcDist = Vector3.Distance(pPos, npcGo.transform.position);
+                    float focDist = Vector3.Distance(pPos, go.transform.position);
+                    if (npcDist < focDist) { go = npcGo; npcName = DescribeNpc(go); }
+                }
             }
             var placeable = npcName == null ? (go.GetComponent<Placeable>() ?? go.GetComponentInParent<Placeable>()) : null;
-            string name = npcName ?? (placeable != null ? DescribePlaceable(placeable) : go.name);
+            // Clean the raw-GameObject-name fallback too (e.g. "City_Plaque" -> "Placa da
+            // cidade", "Post Box" -> "Caixa de correio") - same cleanup the nav list uses.
+            string name = npcName ?? (placeable != null ? DescribePlaceable(placeable) : CleanSceneObjectName(go.name));
             if (Main.DebugMode) DebugLogger.LogState($"WorldNav: interaction target go=\"{go.name}\" npc={(npcName != null)} placeable=\"{(placeable != null ? placeable.gameObject.name : "null")}\" -> name=\"{name}\"");
             return (name, go.transform.position);
         }

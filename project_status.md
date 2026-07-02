@@ -92,7 +92,32 @@
   tavern lit by candles...") will be hand-written for the fixed intro
   content only, not auto-generated via AI vision (out of scope for now).
 
-## Stopping point - 2026-06-25, round 132 (most recent)
+## Stopping point - 2026-06-28, round 133 (most recent)
+
+User confirmed expel+calm mission succeeded. New mission: fill bucket from well,
+fill barrel with water, serve 5 cups of water.
+
+- **Poço em Máquinas**: `Well` is MonoBehaviour (not Placeable), added dedicated
+  scan in BuildTargetList -> "Poço" under "Máquinas".
+- **Materiais category**: Added "Materiais" to CategoryOrder. Scan `Harvestable`
+  (trees, herbs) and `MiscellaneousHarvest` (stones, minerals) near player; name
+  from first harvested item (`IABAKHPEOAF()`), fallback "Recurso".
+- **Dispenser showing cat name**: In `GetNearestInteractionTarget`, the NPC
+  fallback (`FindClosestAvailableNpc`) now only wins if NPC is CLOSER to the player
+  than the focused interaction object. Before: cat was `IsAvailableByProximity=true`
+  from afar and overrode the focused dispenser.
+- **P key / tutorial popup**: `HandleTutorialHelpKey()` added (runs outside
+  anyUiOpen block). Auto-reads popup text when `mainPopup.activeSelf` transitions
+  false→true. P re-reads the text; if popup was open (blocking movement), also
+  calls `ClosePopUp()`. P when closed: calls `ShowPopUp()`, reads on next frame.
+- **Barrel/water ("no space")**: Not a mod bug - the game's own response when
+  barrel is full or wrong item. Deferred until user confirms what's happening.
+- **Other dispensers no chest**: Deferred. The water dispensers (after barrel)
+  may use a different UI class; will investigate if user confirms it's still broken.
+
+Build clean.
+
+## Stopping point - 2026-06-25, round 132
 
 ROOT CAUSE of the expel objective not completing - read `T112_CalmarCliente`
 (tutorial phase 112). It subscribes two objective handlers:

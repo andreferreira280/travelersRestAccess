@@ -132,6 +132,9 @@ namespace TravellersRestAccess
                     MovementAxisPatch.Apply(_harmony);
                     HotbarSwapPatch.Apply(_harmony);
                     CleaningDebugPatch.Apply(_harmony);
+                    TavernStatsPatch.Apply(_harmony);
+                    ToolSoundPatch.Apply(_harmony);
+                    ToolCursorAimPatch.Apply(_harmony);
                     // User's explicit request 2026-06-19: arrow keys should never move the
                     // character, even outside menus (Up/Down stay free for re-reading
                     // dialogue - that's handled separately in DialogueAnnouncer, unaffected

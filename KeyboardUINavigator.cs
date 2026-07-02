@@ -24,6 +24,13 @@ namespace TravellersRestAccess
         private class NavItem
         {
             public Selectable Anchor;
+            // Grid slots (SlotUI - the oven's modifier/ingredient grids, etc.) aren't
+            // Selectable, so they can't be an Anchor. When this is set, the entry IS a slot
+            // and Anchor is null. Use GO(entry) to get the GameObject of either kind.
+            public GameObject SlotObject;
+            // Optional section header announced when the player first lands on this entry
+            // (e.g. "Ingredientes") - used to mark the right-side ingredient/quick-use group.
+            public string Header;
             public ToggleButton ToggleButton;
             public VolumeSliderUI VolumeSlider;
             public bool IsAudioVolume;
@@ -34,6 +41,9 @@ namespace TravellersRestAccess
             public string ActivationAnnouncement;
             public Func<string> LabelReader;
         }
+
+        // GameObject of an entry, whether it's a normal Selectable anchor or a grid SlotUI.
+        private static GameObject GO(NavItem entry) => entry?.Anchor != null ? entry.Anchor.gameObject : entry?.SlotObject;
 
         // CharacterCreatorUI's gender highlight images (maleFocused/femaleFocused) are
         // private fields with no public accessor - read via reflection so we can announce
@@ -73,6 +83,11 @@ namespace TravellersRestAccess
             typeof(RecipeElementUI).GetField("recipeName", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         private static readonly System.Reflection.FieldInfo RecipeInputSlotsField =
             typeof(RecipeElementUI).GetField("inputSlots", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        // DrinkDispenserUI.MJMNGLHDJFH is the private DrinkDispenser field. SlotUI extends
+        // UIBehaviour (not Selectable), so the barrel side has zero navigable items and we must
+        // announce barrel state directly from the DrinkDispenser's slots instead.
+        private static readonly System.Reflection.FieldInfo DrinkDispenserDataField =
+            typeof(DrinkDispenserUI).GetField("MJMNGLHDJFH", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         private string _lastAnnouncedEncyclopediaContent;
         private string _lastAnnouncedYesNoQuestion;
 
@@ -144,7 +159,7 @@ namespace TravellersRestAccess
         public GameObject GetCurrentSelectedGameObject()
         {
             if (_currentIndex < 0 || _currentIndex >= _items.Count) return null;
-            return _items[_currentIndex].Anchor?.gameObject;
+            return GO(_items[_currentIndex]);
         }
 
         public void Update()
@@ -199,18 +214,26 @@ namespace TravellersRestAccess
             var currentStation = GetOpenStationWindow();
             if (currentStation != _lastStationWindow)
             {
-                // Reset on ANY change (open OR close) so each new station session starts focused on
-                // the STATION (the override is cleared, so GetTopWindow returns the station, which
-                // is the top window - GameInventoryUI never appears in the open-window list). The
-                // user reported it "only worked the second time" when this only fired on open.
-                _manualWindowOverride = null;
+                // Round 134: DrinkDispenserUI may have windowType=EWindow.Disabled, meaning it
+                // doesn't add itself to GetCurrentOpenWindows. GetTopWindow's stationFallback
+                // therefore returns null and falls back to Last.Value = GameInventoryUI. Fixing
+                // by setting the override to the station explicitly when one opens, instead of
+                // clearing it and relying on GetTopWindow to find it via openWindows.
+                _manualWindowOverride = currentStation;  // null on close; station on open
                 _lastStationWindow = currentStation;
+                if (Main.DebugMode) DebugLogger.LogState($"KeyboardUINavigator: station changed to {(currentStation == null ? "null" : currentStation.GetType().Name)}, override set to {(_manualWindowOverride == null ? "null" : _manualWindowOverride.GetType().Name)}");
             }
 
             HandleContainerInventorySwitch();
             var topWindowNow = GetTopWindow();
             if (topWindowNow != _lastTopWindow)
             {
+                if (Main.DebugMode && _lastStationWindow != null)
+                {
+                    var openWindows2 = MainUI.GetCurrentOpenWindows(1);
+                    string names = openWindows2 == null ? "null" : string.Join(", ", System.Linq.Enumerable.Select(openWindows2, w => w.GetType().Name));
+                    DebugLogger.LogState($"KeyboardUINavigator: topWindow changed {_lastTopWindow?.GetType().Name ?? "null"} -> {topWindowNow?.GetType().Name ?? "null"} (station={_lastStationWindow?.GetType().Name}, override={_manualWindowOverride?.GetType().Name ?? "null"}, openWindows=[{names}])");
+                }
                 if (_lastTopWindow != null && _currentIndex >= 0 && _currentIndex < _items.Count)
                 {
                     _rememberedAnchors[_lastTopWindow] = _items[_currentIndex].Anchor;
@@ -301,8 +324,13 @@ namespace TravellersRestAccess
             {
                 Move(-1);
             }
-            else if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
+            else if ((Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
+                && !Input.GetKey(KeyCode.LeftControl) && !Input.GetKey(KeyCode.RightControl))
             {
+                // Ctrl+Enter is the InventoryTransferHandler's transfer key - it must NOT also fire
+                // Activate here, or a crafting slot got DoAutomaticTransfer'd TWICE (navigator +
+                // transfer handler) and the two cancelled out (user: "primeiro Ctrl+Enter não coloca
+                // o ingrediente, só do segundo"). Plain Enter still activates.
                 Activate();
             }
             // Space is intentionally NOT used to activate anything here. It kept closing
@@ -397,8 +425,44 @@ namespace TravellersRestAccess
             // teleported back to the first item.
             if (!sameSet)
             {
-                AnnounceCurrent(interrupt);
+                // DrinkDispenserUI (barrel) has no navigable Selectable items — SlotUI extends
+                // UIBehaviour, not Selectable. Announce barrel slot contents directly so the
+                // user knows focus is on the barrel side, not the inventory.
+                if (_items.Count == 0 && GetTopWindow() is DrinkDispenserUI)
+                    AnnounceDrinkDispenserState(interrupt);
+                else
+                    AnnounceCurrent(interrupt);
             }
+        }
+
+        private void AnnounceDrinkDispenserState(bool interrupt)
+        {
+            var ddUI = DrinkDispenserUI.Get(1);
+            if (ddUI == null) { ScreenReader.Say("Barril", interrupt: interrupt); return; }
+
+            var dispenser = DrinkDispenserDataField?.GetValue(ddUI) as DrinkDispenser;
+            if (dispenser == null || dispenser.slots == null || dispenser.slots.Length == 0)
+            {
+                ScreenReader.Say("Barril", interrupt: interrupt);
+                return;
+            }
+
+            // Service barrel layout: slots[1] = cups, slots[0] = water/liquid.
+            var sb = new System.Text.StringBuilder("Barril:");
+            bool hasContent = false;
+            for (int i = dispenser.slots.Length - 1; i >= 0; i--)
+            {
+                var slot = dispenser.slots[i];
+                if (slot?.itemInstance == null) continue;
+                string name = slot.itemInstance.LHBPOPOIFLE()?.IABAKHPEOAF() ?? "item";
+                if (hasContent) sb.Append(";");
+                sb.Append($" {name}, {slot.Stack}");
+                hasContent = true;
+            }
+            if (!hasContent) sb.Append(" vazio");
+
+            if (Main.DebugMode) DebugLogger.LogState($"KeyboardUINavigator: barrel state announced: {sb}");
+            ScreenReader.Say(sb.ToString(), interrupt: interrupt);
         }
 
         // Verbose structural dump (DebugMode only) so real hierarchy/component data can be
@@ -410,7 +474,8 @@ namespace TravellersRestAccess
             for (int i = 0; i < items.Count; i++)
             {
                 var entry = items[i];
-                var go = entry.Anchor.gameObject;
+                var go = GO(entry);
+                if (go == null) continue;
                 string path = HierarchyPath(go.transform, 5);
                 string components = string.Join("+", new[]
                 {
@@ -422,7 +487,10 @@ namespace TravellersRestAccess
                     entry.MultiSelectPrev != null ? "MultiSelect" : null,
                 }.Where(s => s != null));
 
-                DebugLogger.LogState($"  [{i}] \"{go.name}\" path={path} components=[{components}] interactable={entry.Anchor.interactable}");
+                // entry.Anchor is null for grid SlotObject entries (crafting slots) - guard it, or
+                // this debug dump throws a NullReferenceException every frame a crafting UI is open.
+                string interactable = entry.Anchor != null ? entry.Anchor.interactable.ToString() : "slot";
+                DebugLogger.LogState($"  [{i}] \"{go.name}\" path={path} components=[{components}] interactable={interactable}");
             }
         }
 
@@ -448,6 +516,17 @@ namespace TravellersRestAccess
                 return null;
             }
 
+            // [station rule] A crafting station (oven/malt = GameCraftingUI) with NO recipe open must
+            // focus the STATION, never the inventory side - the inventory there is empty/irrelevant
+            // until a recipe is open (user: "inv na máquina de malte vem como menu padrão sem receita
+            // aberta"). Overrides any stale override pointing at the inventory.
+            var openCrafting = GetOpenCraftingWindow();
+            if (openCrafting != null && !IsCraftingRecipeOpen())
+            {
+                _manualWindowOverride = openCrafting;
+                return openCrafting;
+            }
+
             if (_manualWindowOverride != null)
             {
                 // Confirmed live (debug log): a chest's GameInventoryUI never gets added to
@@ -456,18 +535,30 @@ namespace TravellersRestAccess
                 // the normal "open as a window" flow). So the override can legitimately be
                 // a window that's never IN this list - only clear it once the chest itself
                 // (the thing that made the override meaningful) isn't open anymore.
-                bool chestStillOpen = false;
+                // Round 134: also check DrinkDispenserUI.IsOpen() directly, since it may have
+                // windowType=EWindow.Disabled and never appear in openWindows at all.
+                bool stationStillOpen = false;
                 foreach (var w in openWindows)
                 {
-                    if (IsStationWindow(w)) { chestStillOpen = true; break; }
+                    if (IsStationWindow(w)) { stationStillOpen = true; break; }
                 }
-                if (chestStillOpen || openWindows.Contains(_manualWindowOverride))
+                if (!stationStillOpen)
+                {
+                    var ddCheck = DrinkDispenserUI.Get(1);
+                    if (ddCheck != null && ddCheck.IsOpen()) stationStillOpen = true;
+                }
+                if (stationStillOpen || openWindows.Contains(_manualWindowOverride))
                 {
                     return _manualWindowOverride;
                 }
             }
 
             _manualWindowOverride = null;
+            // When a station is open, default to it instead of Last.Value.
+            // DrinkDispenserUI.OpenUI() calls GameInventoryUI.OpenUI() first, so repeated
+            // opens can push GameInventoryUI to Last — always prefer the station explicitly.
+            var stationFallback = GetOpenStationWindow();
+            if (stationFallback != null) return stationFallback;
             return openWindows.Last.Value;
         }
 
@@ -482,14 +573,39 @@ namespace TravellersRestAccess
         // (DrinkDispenserUI : UIWindow, NOT a ContainerUI, which is why the switch used to skip it
         // - confirmed in the log: "switch skipped - no chest open, openWindows=[DrinkDispenserUI]";
         // DrinkDispenserUI.OpenUI calls GameInventoryUI.Get(..).OpenUI()).
-        private static bool IsStationWindow(UIWindow w) => w is ContainerUI || w is DrinkDispenserUI;
+        // GameCraftingUI added [54]: the oven/malt are stations too - RightArrow should switch
+        // to the inventory (ingredients) just like the drinks dispenser/containers do.
+        private static bool IsStationWindow(UIWindow w) => w is ContainerUI || w is DrinkDispenserUI || w is GameCraftingUI;
 
         private static UIWindow GetOpenStationWindow()
         {
+            // DrinkDispenserUI may have windowType=EWindow.Disabled and therefore never
+            // appear in GetCurrentOpenWindows. Check it via IsOpen() directly first.
+            var ddUI = DrinkDispenserUI.Get(1);
+            if (ddUI != null && ddUI.IsOpen()) return ddUI;
             var windows = MainUI.GetCurrentOpenWindows(1);
             if (windows == null) return null;
             foreach (var w in windows) { if (IsStationWindow(w)) return w; }
             return null;
+        }
+
+        // A crafting recipe's ingredient editor (ModifierUI window) is open - the only time the
+        // oven/malt inventory side should be reachable. NOTE: the ModifierUI GameObjects are
+        // PERSISTENT (always activeInHierarchy - they're reparented, not toggled), so the old
+        // activeInHierarchy test was always true and the inventory appeared before a recipe was
+        // opened. The real signal is window.IsOpen(), exposed as ModifierUI.IsOpened(). In single
+        // player Get(_) always returns the one instance.
+        private static bool IsCraftingRecipeOpen()
+        {
+            try { var m = ModifierUI.Get(1); return m != null && m.IsOpened(); }
+            catch { return false; }
+        }
+
+        // The open crafting station window (oven/malt), or null. GameCraftingUI is a UIWindow.
+        private static UIWindow GetOpenCraftingWindow()
+        {
+            var c = GameCraftingUI.Get(1);
+            return (c != null && c.IsOpen()) ? c : null;
         }
 
         private void HandleContainerInventorySwitch()
@@ -503,6 +619,12 @@ namespace TravellersRestAccess
             foreach (var window in openWindows)
             {
                 if (IsStationWindow(window)) { stationWindow = window; break; }
+            }
+            // DrinkDispenserUI may not be in openWindows (windowType=EWindow.Disabled)
+            if (stationWindow == null)
+            {
+                var ddDirect = DrinkDispenserUI.Get(1);
+                if (ddDirect != null && ddDirect.IsOpen()) stationWindow = ddDirect;
             }
             if (stationWindow == null)
             {
@@ -523,6 +645,22 @@ namespace TravellersRestAccess
 
             UIWindow current = _manualWindowOverride ?? GetTopWindow();
             bool toInventory = current == stationWindow;
+            // [station rule] The crafting (oven/malt) inventory side only makes sense once a
+            // recipe's ingredient editor (ModifierUI) is open - before that the filtered inventory
+            // is empty, so the right side must not appear at all (user: "quando ainda não tiver
+            // aberto a receita o menu a direita não tem de aparecer").
+            if (toInventory && stationWindow is GameCraftingUI)
+            {
+                int modCount = 0;
+                foreach (var m in UnityEngine.Object.FindObjectsOfType<ModifierUI>())
+                    if (m != null && m.gameObject.activeInHierarchy) modCount++;
+                if (Main.DebugMode) DebugLogger.LogState($"KeyboardUINavigator: crafting switch->inv, recipeOpen={IsCraftingRecipeOpen()} activeModifierUIs={modCount}");
+                if (!IsCraftingRecipeOpen())
+                {
+                    ScreenReader.Say("Abra uma receita primeiro", interrupt: true);
+                    return;
+                }
+            }
             _manualWindowOverride = toInventory ? inventoryWindow : stationWindow;
             if (Main.DebugMode) DebugLogger.LogState($"KeyboardUINavigator: switched focus to {(toInventory ? "inventory" : "station")}");
 
@@ -980,7 +1118,166 @@ namespace TravellersRestAccess
                 ReorderEncyclopediaSubsections(result);
             }
 
+            // Grid slots (SlotUI) aren't Selectable, so the scan above misses them - this is
+            // why the oven's modifier/ingredient grid and quantity slots were unreachable by
+            // keyboard. When a crafting UI is open, add the active SlotUI under it as navigable
+            // entries (deduped against slots already covered by a Selectable wrapper, e.g. the
+            // recipe list). Scoped to crafting so no other menu's behaviour changes.
+            bool craftingOpen = UnityEngine.Object.FindObjectsOfType<GameCraftingUI>().Any(c => c != null && c.gameObject.activeInHierarchy)
+                || UnityEngine.Object.FindObjectsOfType<ModifierUI>().Any(m => m != null && m.gameObject.activeInHierarchy);
+            if (craftingOpen)
+            {
+                // [54] Two distinct "sides": the STATION view (GameCraftingUI/ModifierUI) shows
+                // the recipe + modifier slots; pressing RightArrow switches to the INVENTORY view
+                // (GameInventoryUI) which shows your items to place (ingredients/quick-use). So
+                // add modifier/crafting slots only on the station side, and inventory item slots
+                // only on the inventory side - no more mixing them into one cluttered list.
+                bool inventoryView = topWindow is GameInventoryUI;
+                var alreadyHave = new HashSet<GameObject>();
+                foreach (var r in result) { var g = GO(r); if (g != null) alreadyHave.Add(g); }
+
+                var slotEntries = new List<NavItem>();
+                int totalFound = 0, skipped = 0, skippedDup = 0;
+                foreach (var slot in UnityEngine.Object.FindObjectsOfType<SlotUI>())
+                {
+                    if (slot == null || !slot.gameObject.activeInHierarchy) continue;
+                    totalFound++;
+                    bool inCrafting = slot.GetComponentInParent<GameCraftingUI>() != null
+                        || slot.GetComponentInParent<ModifierUI>() != null;
+                    string sDesc = DescribeSlotObject(slot.gameObject);
+                    bool hasItem = !string.IsNullOrEmpty(sDesc) && sDesc != "Vazio";
+                    // Station side -> only the crafting/modifier slots. Inventory side -> only the
+                    // player's non-empty item slots (the ingredients to place).
+                    bool keep = inventoryView ? (!inCrafting && hasItem) : inCrafting;
+                    if (!keep) { skipped++; continue; }
+                    var sgo = slot.gameObject;
+                    if (alreadyHave.Contains(sgo)) { skippedDup++; continue; }
+                    var parentSel = sgo.GetComponentInParent<Selectable>();
+                    if (parentSel != null && alreadyHave.Contains(parentSel.gameObject)) { skippedDup++; continue; }
+                    if (!alreadyHave.Add(sgo)) { skippedDup++; continue; }
+                    slotEntries.Add(new NavItem { SlotObject = sgo });
+                    if (Main.DebugMode) DebugLogger.LogState($"CraftSlot ADD: \"{sgo.name}\" path={HierarchyPath(sgo.transform, 6)} -> \"{DescribeSlotObject(sgo)}\"");
+                }
+                slotEntries = slotEntries
+                    .OrderByDescending(e => Mathf.Round(e.SlotObject.transform.position.y / 30f))
+                    .ThenBy(e => e.SlotObject.transform.position.x)
+                    .ToList();
+                result.AddRange(slotEntries);
+                if (Main.DebugMode) DebugLogger.LogState($"KeyboardUINavigator: crafting slots ({(topWindow is GameInventoryUI ? "inventory side" : "station side")}): found {totalFound}, added {slotEntries.Count} (skipped {skipped}, {skippedDup} dup)");
+
+                // [station rule] Aceitar/Cancelar (and Combustível/Confirmar/Voltar) belong to the
+                // STATION side only (user: "deixe o aceitar e cancelar apenas no menu da estação").
+                // The main Selectable scan can miss them when they live under a separate ModifierUI,
+                // so add them explicitly here - but only on the station side (!inventoryView).
+                if (!inventoryView)
+                {
+                    foreach (var btn in UnityEngine.Object.FindObjectsOfType<Button>())
+                    {
+                        if (btn == null || !btn.gameObject.activeInHierarchy || !btn.interactable) continue;
+                        if (btn.GetComponentInParent<GameCraftingUI>() == null && btn.GetComponentInParent<ModifierUI>() == null) continue;
+                        string bn = btn.gameObject.name;
+                        bool isAction = bn.Contains("Accept") || bn.Contains("Aceitar")
+                            || bn.Contains("Cancel") || bn.Contains("Cancelar")
+                            || bn.Contains("Fuel") || bn.Contains("Combust")
+                            || bn.Contains("Craft") || bn.Contains("Confirm")
+                            || bn.Contains("Back") || bn == "Voltar";
+                        if (!isAction || alreadyHave.Contains(btn.gameObject)) continue;
+                        alreadyHave.Add(btn.gameObject);
+                        result.Add(new NavItem { Anchor = btn });
+                        if (Main.DebugMode) DebugLogger.LogState($"CraftAction ADD: \"{bn}\"");
+                    }
+                }
+            }
+
+            // User [74][76][77]: in EVERY list, the Back ("Voltar") button must be the last
+            // item; and in menus with Accept/Cancel (cooking, malt, modifiers) "Aceitar" must
+            // be the penultimate and "Cancelar" the last. Applied to all windows here.
+            ReorderTerminalButtons(result);
+
             return result;
+        }
+
+        // Moves the standard terminal buttons to the end of the navigation list, in the order
+        // the user expects: [...others...], Aceitar, Voltar, Cancelar (whichever exist). So a
+        // plain list ends with Voltar; an Accept/Cancel menu ends with Aceitar then Cancelar.
+        private void ReorderTerminalButtons(List<NavItem> items)
+        {
+            NavItem accept = null, cancel = null, back = null;
+            foreach (var it in items)
+            {
+                var g = GO(it);
+                if (g == null) continue;
+                string n = g.name;
+                bool isBack = n == "Voltar" || (g.transform.parent != null && g.transform.parent.name == "BackButton");
+                bool isAccept = n == "AcceptButton" || n == "Aceitar" || n.Contains("Accept");
+                bool isCancel = n == "CancelButton" || n == "Cancelar" || n.Contains("Cancel");
+                if (isAccept && accept == null) accept = it;
+                else if (isCancel && cancel == null) cancel = it;
+                else if (isBack && back == null) back = it;
+            }
+            foreach (var t in new[] { accept, back, cancel })
+            {
+                if (t == null) continue;
+                items.Remove(t);
+                items.Add(t);
+            }
+        }
+
+        private static string DescribeSlotObject(GameObject go)
+        {
+            if (go == null) return "Vazio";
+            var slotUI = go.GetComponent<SlotUI>();
+            if (slotUI != null) return DescribeSlotUI(slotUI);
+            return UITextExtractor.GetReadableText(go);
+        }
+
+        // After placing an ingredient, read what's now in the MODIFIER slots (the "left menu"
+        // the user [82] wants to hear), so they know what went into the oven and can remove it
+        // if wrong. The modifier target slots live under "ModifiersSlots" (Mod1/Mod2/Mod3).
+        private static System.Reflection.MethodInfo _modReqNotMet;
+
+        // The state of the open modifier (oven/malt ingredient editor): what's placed in the
+        // modifier input slots + whether it's ready to prepare. Public/static so the Ctrl+Enter
+        // transfer (InventoryTransferHandler) can announce it after moving an ingredient.
+        // Reads ModifierUI.Get(1) directly (the ModifierUI GameObjects are persistent, so the old
+        // FindObjectsOfType+activeInHierarchy grabbed an empty/wrong instance -> false "faltam").
+        // Ready = the game's own gate: isCraftable (fuel + base ingredients) && !AHHJNGNCFED()
+        // (the required modifier ingredient is present). Returns null when no recipe is open.
+        public static string CraftingModifierState()
+        {
+            try
+            {
+                var mod = ModifierUI.Get(1);
+                if (mod == null || !mod.IsOpened()) return null;
+
+                var placed = new System.Collections.Generic.List<string>();
+                if (mod.slots != null)
+                {
+                    int n = Mathf.Min(3, mod.slots.Length);   // slots[0..2] = the modifier inputs
+                    for (int i = 0; i < n; i++)
+                    {
+                        var inst = mod.slots[i]?.itemInstance;
+                        if (inst == null) continue;
+                        var it = inst.LHBPOPOIFLE();
+                        string nm = it != null ? it.IABAKHPEOAF() : "item";
+                        placed.Add(mod.slots[i].Stack > 1 ? $"{nm}, {mod.slots[i].Stack}" : nm);
+                    }
+                }
+
+                bool ready = false;
+                if (mod.isCraftable)
+                {
+                    if (_modReqNotMet == null)
+                        _modReqNotMet = typeof(ModifierUI).GetMethod("AHHJNGNCFED",
+                            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    ready = _modReqNotMet != null && !(bool)_modReqNotMet.Invoke(mod, null);
+                }
+
+                string state = ready ? "Pronto para preparar" : "Ainda faltam ingredientes";
+                return placed.Count == 0 ? $"Nada colocado. {state}"
+                    : $"Colocado: {string.Join(", ", placed)}. {state}";
+            }
+            catch { return null; }
         }
 
         // An expanded Encyclopedia section's subsections are Unity-instantiated clones of
@@ -1120,9 +1417,38 @@ namespace TravellersRestAccess
                     parts.Add($"{iName} {ing.amount}, tem {owned}");
                 }
             }
+            // User [76][84]: read ALL the recipe info, not just ingredients. Yield (how many it
+            // makes), sell value, fuel and silver cost - same data the game's tooltip shows.
+            string yieldPart = "";
+            try
+            {
+                if (recipe.output.item != null)
+                {
+                    string outName = recipe.output.item.IABAKHPEOAF();
+                    if (!string.IsNullOrEmpty(outName)) yieldPart = $"Faz {recipe.output.amount} de {outName}. ";
+                }
+            }
+            catch { }
+
+            var extra = new System.Collections.Generic.List<string>();
+            try
+            {
+                var outInst = entry.recipeElementInfo?.outputSlot?.IHENCGDNPBL?.itemInstance;
+                if (outInst != null)
+                {
+                    string priceStr = Money.CalculateSellPrice(outInst, true).ToString();
+                    if (!string.IsNullOrEmpty(priceStr)) extra.Add($"vende por {priceStr}");
+                }
+            }
+            catch { }
+            try { if (recipe.fuel > 0) extra.Add($"combustível {recipe.fuel}"); } catch { }
+            try { if (recipe.recipeSilverCost > 0) extra.Add($"custa {Mathf.RoundToInt(recipe.recipeSilverCost)} de prata"); } catch { }
+
             if (Main.DebugMode) DebugLogger.LogState($"DescribeRecipeListEntry: \"{entry.gameObject.name}\" -> {name} canCraft={canCraft} ingredients={parts.Count}");
-            string head = $"Receita: {name}. {(canCraft ? "Dá pra fazer" : "Faltam ingredientes")}";
-            return parts.Count > 0 ? $"{head}. Precisa: {string.Join(", ", parts)}" : head;
+            string head = $"{yieldPart}Receita: {name}. {(canCraft ? "Dá pra fazer" : "Faltam ingredientes")}";
+            if (parts.Count > 0) head += $". Precisa: {string.Join(", ", parts)}";
+            if (extra.Count > 0) head += $". {string.Join(", ", extra)}";
+            return head;
         }
 
         // Round 110: a recipe slot - user's request: "no campo de ingredientes informe o que pede,
@@ -1263,6 +1589,18 @@ namespace TravellersRestAccess
             if (_currentIndex < 0 || _currentIndex >= _items.Count) return;
 
             var entry = _items[_currentIndex];
+
+            // Grid slot entries (SlotUI - oven modifier/ingredient grids): no Selectable
+            // anchor, so announce the slot's own content (item name + amount).
+            if (entry.SlotObject != null)
+            {
+                string slotText = DescribeSlotObject(entry.SlotObject);
+                string prefix = string.IsNullOrEmpty(entry.Header) ? "" : entry.Header + ". ";
+                ScreenReader.Say($"{prefix}{slotText} ({_currentIndex + 1} of {_items.Count})", interrupt);
+                DebugLogger.LogState($"Focus: {entry.SlotObject.name} -> \"{slotText}\"");
+                return;
+            }
+
             var item = entry.Anchor;
             string text = entry.LabelReader != null ? entry.LabelReader() : UITextExtractor.GetReadableText(item.gameObject);
             string message;
@@ -1297,8 +1635,79 @@ namespace TravellersRestAccess
                 }
             }
 
+            // User couldn't tell what a recipe needs ("não consigo ver os ingredientes") - so
+            // when the focused element is a recipe, append its ingredient list with have/need
+            // counts and whether it can be made right now.
+            string recipeInfo = DescribeRecipeIngredients(item.gameObject);
+            if (!string.IsNullOrEmpty(recipeInfo)) message = $"{message}. {recipeInfo}";
+
             ScreenReader.Say(message, interrupt);
             DebugLogger.LogState($"Focus: {item.gameObject.name} -> \"{text}\"");
+        }
+
+        // Reflection into RecipeElementUI's private Recipe field to read the recipe behind a
+        // focused crafting-menu element (the oven/cooking UI). Ingredient counts come from
+        // CraftingInventory; item names from the game's own localized name accessor.
+        private static readonly System.Reflection.FieldInfo RecipeElementRecipeField =
+            typeof(RecipeElementUI).GetField("JNLKEMLDFIM", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+        private static string DescribeRecipeIngredients(GameObject go)
+        {
+            if (RecipeElementRecipeField == null || go == null) return null;
+            var elem = go.GetComponent<RecipeElementUI>() ?? go.GetComponentInParent<RecipeElementUI>();
+            if (elem == null) return null;
+
+            Recipe recipe = RecipeElementRecipeField.GetValue(elem) as Recipe;
+            if (recipe == null || recipe.ingredientsNeeded == null || recipe.ingredientsNeeded.Length == 0) return null;
+
+            var parts = new System.Collections.Generic.List<string>();
+            bool canCraft = true;
+            foreach (var ing in recipe.ingredientsNeeded)
+            {
+                if (ing.item == null) continue;
+                string nm = ing.item.IABAKHPEOAF();
+                if (string.IsNullOrEmpty(nm)) nm = "ingrediente";
+                int have = 0;
+                try { have = CraftingInventory.KCCBHHEGEHG(1, ing.item); } catch { }
+                if (have < ing.amount) canCraft = false;
+                parts.Add($"{nm}, tem {have} de {ing.amount}");
+            }
+            // User wanted "todas as infos da receita" - prepend the yield (how many it makes)
+            // and append time/fuel/silver cost when present, plus a hint that meat-style
+            // recipes choose the ingredient via the modifier slot.
+            string yieldPart = null;
+            try
+            {
+                if (recipe.output.item != null)
+                {
+                    string outName = recipe.output.item.IABAKHPEOAF();
+                    if (!string.IsNullOrEmpty(outName)) yieldPart = $"Faz {recipe.output.amount} de {outName}. ";
+                }
+            }
+            catch { }
+
+            var extra = new System.Collections.Generic.List<string>();
+            // Sell value (user [7]: "por quanto o bife é vendido"). Computed from the recipe's
+            // output item instance via the game's own price calc.
+            try
+            {
+                var outInst = elem.outputSlot?.IHENCGDNPBL?.itemInstance;
+                if (outInst != null)
+                {
+                    var price = Money.CalculateSellPrice(outInst, true);
+                    string priceStr = price.ToString();
+                    if (!string.IsNullOrEmpty(priceStr)) extra.Add($"vende por {priceStr}");
+                }
+            }
+            catch { }
+            try { if (recipe.fuel > 0) extra.Add($"combustível {recipe.fuel}"); } catch { }
+            try { if (recipe.recipeSilverCost > 0) extra.Add($"custa {Mathf.RoundToInt(recipe.recipeSilverCost)} de prata"); } catch { }
+
+            if (parts.Count == 0)
+                return $"{yieldPart}{(canCraft ? "Pode fazer" : "Faltam ingredientes")}";
+
+            string extraPart = extra.Count > 0 ? $". {string.Join(", ", extra)}" : "";
+            return $"{yieldPart}Ingredientes: {string.Join("; ", parts)}. {(canCraft ? "Pode fazer" : "Faltam ingredientes")}{extraPart}";
         }
 
         private void Activate()
@@ -1313,6 +1722,25 @@ namespace TravellersRestAccess
             UISound.PlayNavigate();
 
             var entry = _items[_currentIndex];
+
+            // Grid slot entries (oven modifier/ingredient grids, inventory in the crafting
+            // context). The game's intended "use this slot" action for crafting is the
+            // automatic transfer (shift-click equivalent): on an inventory meat it moves the
+            // meat INTO the focused modifier slot; on a filled modifier slot it moves it back.
+            // SlotUI.DoAutomaticTransfer(player) is the public entry that does this with all
+            // the game's bookkeeping (confirmed via decompiled research). Fall back to a real
+            // pointer click for slots that aren't transfer-based.
+            if (entry.SlotObject != null)
+            {
+                // [project rule] Transfer (add/remove) is Ctrl+Enter ONLY (InventoryTransferHandler).
+                // Plain Enter must NOT move items - it was moving the placed ingredient back to the
+                // inventory (user: "enter está removendo; só control enter remove"). So Enter just
+                // re-announces the focused slot; the actual add/remove stays exclusively on Ctrl+Enter.
+                ScreenReader.Say(DescribeSlotObject(entry.SlotObject), interrupt: true);
+                DebugLogger.LogInput("Enter", $"crafting slot {entry.SlotObject.name} (announce only)");
+                return;
+            }
+
             var item = entry.Anchor;
             string label = entry.LabelReader != null ? entry.LabelReader() : UITextExtractor.GetReadableText(item.gameObject);
 
@@ -1356,6 +1784,20 @@ namespace TravellersRestAccess
             else
             {
                 ExecuteEvents.Execute(item.gameObject, new BaseEventData(EventSystem.current), ExecuteEvents.submitHandler);
+                // Slot elements (SlotUI / SlotUIRecipe - e.g. the oven's modifier slot "Carne")
+                // are clicked via IPointerDown + IPointerUp, NOT IPointerClickHandler (confirmed:
+                // SlotUI implements IPointerDownHandler/IPointerUpHandler but NOT
+                // IPointerClickHandler - so the earlier pointerClick attempt did nothing). Send
+                // the full down->up->click sequence so the slot reacts exactly like a real mouse
+                // click. Skipped for toggles (they handle submit already; extra events would
+                // double-toggle).
+                if (toggle == null)
+                {
+                    var pointerData = new PointerEventData(EventSystem.current) { button = PointerEventData.InputButton.Left };
+                    ExecuteEvents.Execute(item.gameObject, pointerData, ExecuteEvents.pointerDownHandler);
+                    ExecuteEvents.Execute(item.gameObject, pointerData, ExecuteEvents.pointerUpHandler);
+                    ExecuteEvents.Execute(item.gameObject, pointerData, ExecuteEvents.pointerClickHandler);
+                }
             }
 
             // Re-picking the same Encyclopedia subsection didn't re-announce its body text

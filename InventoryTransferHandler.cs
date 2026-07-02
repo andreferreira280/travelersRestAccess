@@ -176,9 +176,27 @@ namespace TravellersRestAccess
             // stations (the drinks dispenser / beer tap, etc.) set MainUI.GetCurrentContainer when
             // open. Use it, but ONLY while such a station window is actually open, so a stale value
             // from a closed station is never used (the round-44 hazard the comment above warned of).
+            // Round 134 fix: for the SERVICE BARREL, DrinkDispenserUI.GIMEBIPKLMM calls LIIGLHOFDBK
+            // which has a game bug — both if-branches check `== 0`, so playerNum=1 never sets
+            // MainUI.GetCurrentContainer. Get the DrinkDispenser directly from the UI via reflection
+            // before falling back to the (potentially stale) GetCurrentContainer.
             if (IsNonChestStationOpen(playerNum))
             {
+                var ddUI = DrinkDispenserUI.Get(playerNum);
+                if (ddUI != null && ddUI.IsOpen())
+                {
+                    var field = typeof(DrinkDispenserUI).GetField("MJMNGLHDJFH",
+                        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    if (field?.GetValue(ddUI) is Container directContainer)
+                    {
+                        if (Main.DebugMode) DebugLogger.LogState(
+                            $"InventoryTransfer: DrinkDispenserUI open, got dispenser via reflection (type={directContainer.GetType().Name}, slots={directContainer.slots?.Length ?? 0})");
+                        return directContainer;
+                    }
+                    if (Main.DebugMode) DebugLogger.LogState("InventoryTransfer: DrinkDispenserUI open but MJMNGLHDJFH reflection returned null");
+                }
                 var stationContainer = MainUI.GetCurrentContainer(playerNum);
+                if (Main.DebugMode) DebugLogger.LogState($"InventoryTransfer: NonChestStation fallback container={stationContainer?.GetType().Name ?? "null"}");
                 if (stationContainer != null) return stationContainer;
             }
             return null;
@@ -186,12 +204,27 @@ namespace TravellersRestAccess
 
         private static bool IsNonChestStationOpen(int playerNum)
         {
+            // DrinkDispenserUI may have windowType=EWindow.Disabled and not appear in
+            // GetCurrentOpenWindows — check IsOpen() directly first.
+            var ddUI = DrinkDispenserUI.Get(playerNum);
+            if (ddUI != null && ddUI.IsOpen()) return true;
             var windows = MainUI.GetCurrentOpenWindows(playerNum);
             if (windows == null) return false;
             foreach (var w in windows)
             {
                 if (w is DrinkDispenserUI) return true;
             }
+            return false;
+        }
+
+        // The oven/malt crafting screen. FindObjectsOfType (not GetCurrentOpenWindows) to match
+        // KeyboardUINavigator - GameCraftingUI isn't always registered in the open-window list.
+        // Only called on a Ctrl+Enter keypress, so the scan cost is negligible.
+        private static bool IsCraftingUIOpen()
+        {
+            var crafting = UnityEngine.Object.FindObjectsOfType<GameCraftingUI>();
+            foreach (var c in crafting)
+                if (c != null && c.gameObject.activeInHierarchy) return true;
             return false;
         }
 
@@ -219,6 +252,32 @@ namespace TravellersRestAccess
         private void HandleContainerTransfer()
         {
             const int playerNum = 1;
+
+            // [54] Oven / crafting station: a Crafter is NOT a Container - ingredients aren't held
+            // in station slots like a chest. The game shift-clicks them into the recipe's
+            // modifier/ingredient slots (and back out) via SlotUI.DoAutomaticTransfer. So when the
+            // crafting UI is open, Ctrl+Enter on the focused slot runs that transfer (same action
+            // Enter does in the navigator), giving the uniform "Ctrl+Enter adiciona / remove" the
+            // user expects at EVERY station - the chest-container path below would just say
+            // "Nenhuma estação aberta" since there's no Container to find.
+            if (_focusedGameObject != null && IsCraftingUIOpen())
+            {
+                var craftSlot = _focusedGameObject.GetComponent<SlotUI>() ?? _focusedGameObject.GetComponentInParent<SlotUI>();
+                if (craftSlot != null)
+                {
+                    try { craftSlot.DoAutomaticTransfer(playerNum); }
+                    catch (System.Exception ex) { if (Main.DebugMode) DebugLogger.LogState($"InventoryTransfer: oven DoAutomaticTransfer threw: {ex.Message}"); }
+                    if (Main.DebugMode) DebugLogger.LogState($"InventoryTransfer: Ctrl+Enter oven auto-transfer on \"{_focusedGameObject.name}\"");
+                    // Announce what's now in the modifier + whether it's ready (instead of a blind
+                    // "movido"). Note: the game routes an inventory item into the FOCUSED modifier
+                    // slot - the first Ctrl+Enter on an unfocused slot only focuses it, so the state
+                    // may read unchanged until a second press (known game quirk, to be smoothed later).
+                    string state = KeyboardUINavigator.CraftingModifierState();
+                    ScreenReader.Say(string.IsNullOrEmpty(state) ? "Ingrediente movido" : state, interrupt: true);
+                    return;
+                }
+            }
+
             Slot sourceSlot = GetFocusedSlot();
             if (sourceSlot == null || sourceSlot.itemInstance == null)
             {
@@ -254,6 +313,17 @@ namespace TravellersRestAccess
             string from = IsChestOpen(playerNum) ? "do baú" : "da estação";
             string actionLabel = sourceIsStation ? $"retirado {from}" : $"colocado {place}";
             if (Main.DebugMode) DebugLogger.LogState($"InventoryTransfer: Ctrl+Enter sourceIsStation={sourceIsStation} station={(station != null ? "set" : "null")}");
+
+            // Round 134: DrinkDispenser.AddItemInstance goes through a container-level type
+            // filter (DOOILKJLDHD) that may reject items acceptable at the individual slot
+            // level. When moving INTO a DrinkDispenser, try its slots directly (slot[0]=liquid,
+            // slot[1]=cups) before falling back to the full container-level AddItemInstance path.
+            if (!sourceIsStation && target is DrinkDispenser dispenser)
+            {
+                if (TryMoveToDispenserSlot(playerNum, sourceSlot, dispenser, actionLabel))
+                    return;
+            }
+
             MoveStack(playerNum, sourceSlot, target, actionLabel);
         }
 
@@ -406,6 +476,37 @@ namespace TravellersRestAccess
             return moved;
         }
 
+        // Round 134: DrinkDispenser container-level filter (CHMEHDFPGCI/DOOILKJLDHD) may
+        // reject items that individual dispenser slots actually accept. Try each slot directly
+        // via FEEOFAGCONJ (same per-slot check used internally by AddItemInstance), bypassing
+        // the container-level filter. Slot[0]=liquid/water, slot[1]=cups.
+        private static bool TryMoveToDispenserSlot(int playerNum, Slot sourceSlot, DrinkDispenser dispenser, string actionLabel)
+        {
+            if (dispenser.slots == null || dispenser.slots.Length == 0) return false;
+            var item = sourceSlot.itemInstance;
+            if (item == null) return false;
+            for (int i = 0; i < dispenser.slots.Length; i++)
+            {
+                var targetSlot = dispenser.slots[i];
+                if (targetSlot == null) continue;
+                if (Main.DebugMode) DebugLogger.LogState(
+                    $"InventoryTransfer: DrinkDispenser direct slot[{i}] try for \"{item.LHBPOPOIFLE()?.IABAKHPEOAF()}\" (type={item.LHBPOPOIFLE()?.GetType().Name ?? "null"})");
+                int moved = MoveUnitsToSlot(playerNum, sourceSlot, targetSlot);
+                if (moved > 0)
+                {
+                    string itemName = item.LHBPOPOIFLE()?.IABAKHPEOAF();
+                    string namePart = string.IsNullOrEmpty(itemName) ? "Item" : itemName;
+                    string message = moved < sourceSlot.Stack + moved
+                        ? $"{namePart} {actionLabel} ({moved} unidade{(moved > 1 ? "s" : "")})"
+                        : $"{namePart} {actionLabel}";
+                    ScreenReader.Say(message, interrupt: true);
+                    return true;
+                }
+                if (Main.DebugMode) DebugLogger.LogState($"InventoryTransfer: DrinkDispenser slot[{i}] rejected");
+            }
+            return false;
+        }
+
         private static void MoveStack(int playerNum, Slot sourceSlot, Container target, string actionLabel)
         {
             var item = sourceSlot.itemInstance;
@@ -415,7 +516,13 @@ namespace TravellersRestAccess
             if (moved <= 0)
             {
                 ScreenReader.Say("Sem espaço", interrupt: true);
-                if (Main.DebugMode) DebugLogger.LogState($"InventoryTransfer: 0 moved of \"{item.LHBPOPOIFLE()?.IABAKHPEOAF()}\" ({actionLabel}) - target had no room/wouldn't accept it");
+                if (Main.DebugMode)
+                {
+                    string itemType = item.LHBPOPOIFLE()?.GetType().Name ?? "null";
+                    string containerType = target?.GetType().Name ?? "null";
+                    int slotCount = target?.slots?.Length ?? 0;
+                    DebugLogger.LogState($"InventoryTransfer: 0 moved of \"{item.LHBPOPOIFLE()?.IABAKHPEOAF()}\" (type={itemType}) ({actionLabel}) - target={containerType} slots={slotCount}");
+                }
                 return;
             }
 
