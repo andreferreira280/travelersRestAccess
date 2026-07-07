@@ -102,6 +102,14 @@ namespace TravellersRestAccess
         private const float StabilizeDelay = 0.25f;
 
         private List<NavItem> _items = new List<NavItem>();
+        // CollectItems scans every Selectable + SlotUI in the scene; running it EVERY frame while a
+        // menu is open tanked the frame rate and made menu navigation laggy (worst in a full
+        // inventory - user: "navegar no inventário está muito lento, demora entre um item e outro").
+        // Throttle the rebuild; arrow navigation reads the already-built _items, so responsiveness is
+        // unaffected - only how fast a CHANGED list is noticed, which 0.12s covers fine.
+        private float _lastCollectTime;
+        private List<NavItem> _lastFreshItems;
+        private const float CollectInterval = 0.12f;
         public int ItemCount => _items.Count;
         private List<NavItem> _pendingItems;
         private float _pendingSince;
@@ -207,6 +215,21 @@ namespace TravellersRestAccess
                 {
                     var inv = GameInventoryUI.Get(1);
                     if (inv != null && !inv.IsOpen()) { inv.OpenUI(); if (Main.DebugMode) DebugLogger.LogState("Navigator: opened inventory for FireplaceUI"); }
+                }
+            }
+            catch { }
+            // Fuel stations (oven, malt tank, fermentation tank...) open a shared FuelUI when you
+            // press "Combustível" (F), but WITHOUT the player inventory - so there was no right-side
+            // list to move fuel from (user: "forno/malte/fermentação não aparece o inventário à
+            // direita pra pôr combustível; a lareira funciona"). Open the inventory ourselves, exactly
+            // like the fireplace, so the right/left switch + Ctrl+Enter transfer work for fuel too.
+            try
+            {
+                var fuelUI = FuelUI.LJONDAEOMFJ(1);
+                if (fuelUI != null && fuelUI.IsOpen())
+                {
+                    var inv = GameInventoryUI.Get(1);
+                    if (inv != null && !inv.IsOpen()) { inv.OpenUI(); if (Main.DebugMode) DebugLogger.LogState("Navigator: opened inventory for FuelUI"); }
                 }
             }
             catch { }
@@ -323,7 +346,13 @@ namespace TravellersRestAccess
                 _lastAnnouncedYesNoQuestion = null;
             }
 
-            var freshItems = CollectItems(justOpened: !_wasOpen);
+            bool justOpenedNow = !_wasOpen;
+            if (justOpenedNow || _lastFreshItems == null || Time.unscaledTime - _lastCollectTime >= CollectInterval)
+            {
+                _lastCollectTime = Time.unscaledTime;
+                _lastFreshItems = CollectItems(justOpened: justOpenedNow);
+            }
+            var freshItems = _lastFreshItems;
 
             if (!_wasOpen)
             {
