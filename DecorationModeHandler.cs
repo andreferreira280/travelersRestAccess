@@ -1056,7 +1056,7 @@ namespace TravellersRestAccess
                         // (IsObjectInValidLocation(true)=False) even with canBePlaced=True - the 2nd
                         // bench failed on BOTH table sides. Nudge the target to the nearest tile the
                         // game actually accepts (facing is set above; validity depends on it).
-                        var validPos = WorldNavigationHandler.FindNearbyValidPlacement(placeable, targetPos, TileSize * 2f);
+                        var validPos = WorldNavigationHandler.FindNearbyValidPlacement(placeable, targetPos, TileSize * 2f, seat);
                         if (validPos.HasValue) targetPos = validPos.Value;
                         CursorManager.SetCursorPositionFromWorld(1, targetPos);
                         placeable.SetMouseOffset(Vector3.zero);

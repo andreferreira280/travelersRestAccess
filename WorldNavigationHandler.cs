@@ -3606,10 +3606,11 @@ namespace TravellersRestAccess
         // bench still lands at the table's seat but on a tile the game allows. Only checks
         // IsObjectInValidLocation(true) (tile-based, safe to test synchronously) - canBePlaced is
         // physics/frame-delayed and is validated later by the settle-retry.
-        public static Vector3? FindNearbyValidPlacement(Placeable placeable, Vector3 aroundPos, float maxDistance)
+        public static Vector3? FindNearbyValidPlacement(Placeable placeable, Vector3 aroundPos, float maxDistance, Seat associateSeat = null)
         {
             if (placeable == null) return null;
             Vector3 original = placeable.transform.position;
+            Vector3 seatOriginal = associateSeat != null ? associateSeat.transform.position : Vector3.zero;
             const float step = 0.25f;
             int range = Mathf.CeilToInt(maxDistance / step);
             var candidates = new System.Collections.Generic.List<Vector3>();
@@ -3620,16 +3621,30 @@ namespace TravellersRestAccess
                     if (Vector3.Distance(aroundPos, c) <= maxDistance) candidates.Add(c);
                 }
             candidates.Sort((a, b) => Vector3.Distance(aroundPos, a).CompareTo(Vector3.Distance(aroundPos, b)));
-            Vector3? best = null;
+            // Two passes: first prefer a tile that is BOTH game-valid AND associates the seat with a
+            // table (so the bench counts for the "assentos" objective - user: "colocou mas não
+            // associou"); if none associates, fall back to the nearest merely-valid tile so it at
+            // least places.
+            Vector3? bestBoth = null, bestValid = null;
             foreach (var c in candidates)
             {
                 placeable.transform.position = c;
+                if (associateSeat != null) associateSeat.transform.position = c;
                 Physics2D.SyncTransforms();
-                if (placeable.IsObjectInValidLocation(true)) { best = c; break; }
+                if (!placeable.IsObjectInValidLocation(true)) continue;
+                if (!bestValid.HasValue) bestValid = c;
+                if (associateSeat != null)
+                {
+                    try { associateSeat.GetNeighbourTable(); } catch { }
+                    if (associateSeat.table != null) { bestBoth = c; break; }
+                }
+                else { bestBoth = c; break; }
             }
             placeable.transform.position = original;
+            if (associateSeat != null) associateSeat.transform.position = seatOriginal;
             Physics2D.SyncTransforms();
-            if (Main.DebugMode) DebugLogger.LogState($"WorldNav: FindNearbyValidPlacement around {aroundPos} -> {(best.HasValue ? best.Value.ToString() : "none")} ({candidates.Count} candidates)");
+            Vector3? best = bestBoth ?? bestValid;
+            if (Main.DebugMode) DebugLogger.LogState($"WorldNav: FindNearbyValidPlacement around {aroundPos} -> {(best.HasValue ? best.Value.ToString() : "none")} (both={(bestBoth.HasValue ? "y" : "n")} validOnly={(bestValid.HasValue ? "y" : "n")}, {candidates.Count} candidates)");
             return best;
         }
 
