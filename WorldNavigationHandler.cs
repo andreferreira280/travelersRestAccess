@@ -4125,12 +4125,65 @@ namespace TravellersRestAccess
             // the buffer pushed the target a half tile past the collider edge, farther than
             // where the player actually needed to stand. Shrunk to a quarter tile.
             Vector3 result = center + direction * (reach + TileSize * 0.25f);
-            // User reported pathfinding consistently failing for some objects (e.g. the tap/
-            // dispenser, "Torneira") that aren't behind a closed door - logging the computed
-            // point to confirm (not guess) whether this heuristic is landing somewhere
-            // unwalkable for wall-mounted objects specifically.
+
+            // Mine/quarry fix (confirmed in the PERF log: every route to "Minério de ferro (N perto)"
+            // came back "no route", only trivially succeeding at 1 waypoint when the goal got nudged
+            // onto the player): the ore sits in a cluster of OTHER rocks, so the naive "just outside
+            // the collider toward the player" point lands on another unwalkable rock. If the point
+            // isn't a walkable tile, search the tiles around the target (nearest ring first) for the
+            // walkable one closest to the player - that's a tile A* can actually reach.
+            if (!IsWalkableApproach(result, collider))
+            {
+                Vector3? better = FindWalkableApproach(center, collider, playerPos, reach);
+                if (better.HasValue) result = better.Value;
+            }
+
             if (Main.DebugMode) DebugLogger.LogState($"WorldNav: GetApproachPosition for \"{target.name}\" -> center={center} result={result}");
             return result;
+        }
+
+        // A tile is a usable approach if the game says it's a real walkable ground tile AND nothing
+        // solid (a non-trigger collider that isn't the target itself) sits on it - the same two
+        // things the A* search requires (avoidWalls + avoidObjects), so a point passing this is one
+        // the pathfinder can actually stand on.
+        private static readonly Collider2D[] _approachOverlap = new Collider2D[8];
+        private static bool IsWalkableApproach(Vector3 pos, Collider2D target)
+        {
+            bool ground = false;
+            try { ground = WorldGrid.LKBLKCFOEPA(pos); } catch { }
+            if (!ground) return false;
+            int n = Physics2D.OverlapPointNonAlloc(pos, _approachOverlap);
+            for (int i = 0; i < n; i++)
+            {
+                var c = _approachOverlap[i];
+                if (c == null || c.isTrigger || c == target) continue;
+                return false; // a solid object occupies this tile
+            }
+            return true;
+        }
+
+        private static Vector3? FindWalkableApproach(Vector3 center, Collider2D target, Vector3 playerPos, float reach)
+        {
+            Vector3[] dirs =
+            {
+                new Vector3(1, 0), new Vector3(-1, 0), new Vector3(0, 1), new Vector3(0, -1),
+                new Vector3(1, 1).normalized, new Vector3(-1, 1).normalized,
+                new Vector3(1, -1).normalized, new Vector3(-1, -1).normalized,
+            };
+            Vector3? best = null;
+            float bestDist = float.MaxValue;
+            for (int ring = 0; ring < 4; ring++)
+            {
+                foreach (var d in dirs)
+                {
+                    Vector3 cand = center + d * (reach + TileSize * (0.5f + ring));
+                    if (!IsWalkableApproach(cand, target)) continue;
+                    float dist = Vector3.Distance(cand, playerPos);
+                    if (dist < bestDist) { bestDist = dist; best = cand; }
+                }
+                if (best.HasValue) return best; // nearest ring with any walkable tile wins
+            }
+            return best;
         }
 
         // A passage (TravelZone) has TWO trigger squares - one on THIS area's side (`position`) and
@@ -4660,6 +4713,16 @@ namespace TravellersRestAccess
 
         private int _sceneScanStage = -1; // -1 = idle; >=0 = the scan to run THIS frame
 
+        // True in the mine/quarry areas, where tavern furniture (seats/tables/wells/candles) and
+        // trees/animals/farm soil don't exist - used to skip those full-scene scans (lag fix).
+        private static bool IsMiningArea()
+        {
+            var p = PlayerController.GetPlayer(1);
+            if (p == null) return false;
+            var loc = p.LEOIMFNKFGA;
+            return loc == Location.Mine || loc == Location.Quarry || loc == Location.QuarryCave;
+        }
+
         private void RefreshSeatSceneCache()
         {
             // Each full-scene FindObjectsByType is tens of ms in this game's big scenes; doing ALL of
@@ -4676,24 +4739,31 @@ namespace TravellersRestAccess
             }
             if (_sceneScanStage < 0) return;
 
+            // Lag fix (user: "quando entra na pedreira fica bem lento" - PERF log showed each
+            // full-scene FindObjectsByType ~42ms in the mine/quarry). Tavern furniture (candles,
+            // wells, seats, tables) simply doesn't exist in the mining areas, so those scans are
+            // pure wasted cost there - skip them and let the (already empty) caches stand.
+            bool mining = IsMiningArea();
+
             var sw = Main.DebugMode ? System.Diagnostics.Stopwatch.StartNew() : null;
             switch (_sceneScanStage)
             {
                 case 0: _cachedAllPlaceables = FindAll<Placeable>(); break;
                 case 1:
+                    if (mining) { _cachedCandles = new Placeable[0]; break; }
                     _cachedCandles = _cachedAllPlaceables
                         .Where(p => p != null && p.itemSetup != null && p.itemSetup.item != null && p.itemSetup.item.JDJGFAACPFC() == CandleItemId)
                         .ToArray();
                     break;
-                case 2: _cachedWells = FindAll<Well>(); break;
+                case 2: if (mining) { _cachedWells = new Well[0]; break; } _cachedWells = FindAll<Well>(); break;
                 case 3: _cachedHarvestables = FindAll<Harvestable>(); break;
                 case 4: _cachedMiscHarvests = FindAll<MiscellaneousHarvest>(); break;
-                case 5: _cachedTrees = FindAll<Tree>(); break;
-                case 6: _cachedAnimals = FindAll<AnimalNPC>(); break;
+                case 5: if (mining) { _cachedTrees = new Tree[0]; break; } _cachedTrees = FindAll<Tree>(); break;
+                case 6: if (mining) { _cachedAnimals = new AnimalNPC[0]; break; } _cachedAnimals = FindAll<AnimalNPC>(); break;
                 case 7: _cachedRocks = FindAll<Rock>(); break;
-                case 8: _cachedFertileSoils = FindAll<FertileSoil>(); break;
-                case 9: _cachedSeats = FindAll<Seat>(); break;
-                case 10: _cachedTables = FindAll<Table>(); break;
+                case 8: if (mining) { _cachedFertileSoils = new FertileSoil[0]; break; } _cachedFertileSoils = FindAll<FertileSoil>(); break;
+                case 9: if (mining) { _cachedSeats = new Seat[0]; break; } _cachedSeats = FindAll<Seat>(); break;
+                case 10: if (mining) { _cachedTables = new Table[0]; break; } _cachedTables = FindAll<Table>(); break;
             }
             if (sw != null && sw.ElapsedMilliseconds > 3) DebugLogger.LogState($"WorldNav: PERF scene scan stage {_sceneScanStage} took {sw.ElapsedMilliseconds}ms");
             _sceneScanStage++;
