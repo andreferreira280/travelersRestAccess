@@ -267,7 +267,13 @@ namespace TravellersRestAccess
         // must take the same auto-transfer path, not the chest-container path.
         private static bool IsFuelUIOpen(int playerNum)
         {
-            try { var f = FuelUI.LJONDAEOMFJ(playerNum); return f != null && f.IsOpen(); } catch { return false; }
+            try
+            {
+                foreach (var f in UnityEngine.Object.FindObjectsOfType<FuelUI>())
+                    if (f != null && f.gameObject.activeInHierarchy) return true;
+            }
+            catch { }
+            return false;
         }
 
         private static bool IsChestOpen(int playerNum)

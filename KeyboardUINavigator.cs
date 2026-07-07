@@ -225,8 +225,7 @@ namespace TravellersRestAccess
             // like the fireplace, so the right/left switch + Ctrl+Enter transfer work for fuel too.
             try
             {
-                var fuelUI = FuelUI.LJONDAEOMFJ(1);
-                if (fuelUI != null && fuelUI.IsOpen())
+                if (UnityEngine.Object.FindObjectsOfType<FuelUI>().Any(f => f != null && f.gameObject.activeInHierarchy))
                 {
                     var inv = GameInventoryUI.Get(1);
                     if (inv != null && !inv.IsOpen()) { inv.OpenUI(); if (Main.DebugMode) DebugLogger.LogState("Navigator: opened inventory for FuelUI"); }
@@ -682,7 +681,7 @@ namespace TravellersRestAccess
         // DrinkDispenserUI.OpenUI calls GameInventoryUI.Get(..).OpenUI()).
         // GameCraftingUI added [54]: the oven/malt are stations too - RightArrow should switch
         // to the inventory (ingredients) just like the drinks dispenser/containers do.
-        private static bool IsStationWindow(UIWindow w) => w is ContainerUI || w is DrinkDispenserUI || w is GameCraftingUI || w is AgingBarrelUI || w is FireplaceUI;
+        private static bool IsStationWindow(UIWindow w) => w is ContainerUI || w is DrinkDispenserUI || w is GameCraftingUI || w is AgingBarrelUI || w is FireplaceUI || w is FuelUI;
 
         private static UIWindow GetOpenStationWindow()
         {
@@ -1292,7 +1291,10 @@ namespace TravellersRestAccess
             // recipe list). Scoped to crafting so no other menu's behaviour changes.
             bool craftingOpen = UnityEngine.Object.FindObjectsOfType<GameCraftingUI>().Any(c => c != null && c.gameObject.activeInHierarchy)
                 || UnityEngine.Object.FindObjectsOfType<ModifierUI>().Any(m => m != null && m.gameObject.activeInHierarchy)
-                || UnityEngine.Object.FindObjectsOfType<AgingBarrelUI>().Any(b => b != null && b.gameObject.activeInHierarchy);
+                || UnityEngine.Object.FindObjectsOfType<AgingBarrelUI>().Any(b => b != null && b.gameObject.activeInHierarchy)
+                // FuelUI (oven/malt/fermentation fuel) uses the same two-sided layout: fuel slots on the
+                // station side, player inventory on the right to move fuel from.
+                || UnityEngine.Object.FindObjectsOfType<FuelUI>().Any(f => f != null && f.gameObject.activeInHierarchy);
             if (craftingOpen)
             {
                 // [54] Two distinct "sides": the STATION view (GameCraftingUI/ModifierUI) shows
@@ -1312,7 +1314,8 @@ namespace TravellersRestAccess
                     totalFound++;
                     bool inBarrel = slot.GetComponentInParent<AgingBarrelUI>() != null;
                     bool inOvenCraft = !inBarrel && (slot.GetComponentInParent<GameCraftingUI>() != null
-                        || slot.GetComponentInParent<ModifierUI>() != null);
+                        || slot.GetComponentInParent<ModifierUI>() != null
+                        || slot.GetComponentInParent<FuelUI>() != null);
                     bool inCrafting = inBarrel || inOvenCraft;
                     string sDesc = DescribeSlotObject(slot.gameObject);
                     bool hasItem = !string.IsNullOrEmpty(sDesc) && sDesc != "Vazio";
