@@ -235,15 +235,11 @@ namespace TravellersRestAccess
             // inventory (user: "lareira não funciona padrão... itens adicionados ainda aparecem no
             // inventario"). Recognize FireplaceUI so the GetCurrentContainer fallback returns it.
             try { var fpUI = FireplaceUI.Get(playerNum); if (fpUI != null && fpUI.IsOpen()) return true; } catch { }
-            // The shared FuelUI (oven / malt / fermentation tank fuel, opened with F) is a fuel
-            // station like the fireplace - recognize it so Ctrl+Enter routes fuel from the inventory
-            // to its fuel slot (user: "combustível não vai pro forno/malte/fermentação").
-            try { var fuUI = FuelUI.LJONDAEOMFJ(playerNum); if (fuUI != null && fuUI.IsOpen()) return true; } catch { }
             var windows = MainUI.GetCurrentOpenWindows(playerNum);
             if (windows == null) return false;
             foreach (var w in windows)
             {
-                if (w is DrinkDispenserUI || w is FireplaceUI || w is FuelUI) return true;
+                if (w is DrinkDispenserUI || w is FireplaceUI) return true;
             }
             return false;
         }
@@ -259,24 +255,6 @@ namespace TravellersRestAccess
             // stations (dispenser) into DoAutomaticTransfer.
             foreach (var c in UnityEngine.Object.FindObjectsOfType<GameCraftingUI>())
                 if (c != null && c.gameObject.activeInHierarchy) return true;
-            return false;
-        }
-
-        // The shared fuel window (oven / malt / fermentation tank fuel). Like the crafting UI, its
-        // fuel slot isn't a Container - fuel is moved in via SlotUI.DoAutomaticTransfer, so Ctrl+Enter
-        // must take the same auto-transfer path, not the chest-container path.
-        private static bool IsFuelUIOpen(int playerNum)
-        {
-            // MUST use IsOpen(), NOT activeInHierarchy: a placed fuel station's FuelUI GameObject
-            // stays active in the hierarchy even when CLOSED, so activeInHierarchy was true always -
-            // which made Ctrl+Enter route EVERYTHING through the fuel auto-transfer path and scramble
-            // the hotbar/inventory (user: "uso rápido doido, modificando sozinho").
-            try
-            {
-                foreach (var f in UnityEngine.Object.FindObjectsOfType<FuelUI>())
-                    if (f != null && f.IsOpen()) return true;
-            }
-            catch { }
             return false;
         }
 
@@ -324,7 +302,7 @@ namespace TravellersRestAccess
             // user expects at EVERY station - the chest-container path below would just say
             // "Nenhuma estação aberta" since there's no Container to find. Modifier slots aren't
             // stackable in the way half/typed care about, so all amounts do the same auto-transfer.
-            if (_focusedGameObject != null && (IsCraftingUIOpen() || IsFuelUIOpen(playerNum)))
+            if (_focusedGameObject != null && IsCraftingUIOpen())
             {
                 var craftSlot = _focusedGameObject.GetComponent<SlotUI>() ?? _focusedGameObject.GetComponentInParent<SlotUI>();
                 if (craftSlot != null)
