@@ -23,6 +23,12 @@ namespace TravellersRestAccess
     {
         private static readonly FieldInfo CrafterField = AccessTools.Field(typeof(FuelUI), "LDLINOBIKPL");
         private static readonly FieldInfo FuelSlotsField = AccessTools.Field(typeof(FuelUI), "fuelSlotUIs");
+        // The real add-one-fuel handler bound to every fuel slot's OnSlotLeftClick (FuelUI.Start).
+        // We invoke it DIRECTLY (once) instead of the slot's FuelClicked()/OnSlotLeftClick delegate:
+        // the game binds this handler to firewoodSlot AND to its matching fuelSlotUIs entry, so the
+        // delegate can be combined twice on the same slot, adding TWO units per click (user: "add de
+        // dois em dois"). A direct single invoke guarantees exactly one unit per Enter.
+        private static readonly MethodInfo AddOneFuelMethod = AccessTools.Method(typeof(FuelUI), "KFCLFBNIAEO");
 
         // An entry is either a fuel type (Slot != null) or an action button ("craft" / "back").
         private class Entry
@@ -66,11 +72,17 @@ namespace TravellersRestAccess
                 return;
             }
 
-            // Ctrl+Enter ativa a entrada selecionada (adiciona o combustível, ou abre fabricar / volta).
-            bool ctrl = Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl);
-            if (ctrl && (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter)))
+            // Enter (sozinho) ativa a entrada selecionada: adiciona o combustível, ou abre fabricar / volta.
+            if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
             {
                 ActivateEntry(fuel);
+                return;
+            }
+
+            // Esc fecha a estação (o guard do navegador impede que ele feche por conta própria aqui).
+            if (Input.GetKeyDown(KeyCode.Escape))
+            {
+                try { fuel.CloseUI(); } catch { }
             }
         }
 
@@ -138,7 +150,7 @@ namespace TravellersRestAccess
             string name = fuel.crafterName != null && !string.IsNullOrEmpty(fuel.crafterName.text)
                 ? fuel.crafterName.text
                 : "Estação";
-            ScreenReader.Say($"Combustível de {name}. {LoadedFuel(fuel)} colocado. Setas pra escolher, Ctrl+Enter pra adicionar.", interrupt: true);
+            ScreenReader.Say($"Combustível de {name}. {LoadedFuel(fuel)} colocado. Setas pra escolher, Enter pra adicionar, Esc pra sair.", interrupt: true);
             if (_entries.Count > 0) AnnounceEntry(fuel, 0);
             if (Main.DebugMode) DebugLogger.LogState($"FuelStation: opened \"{name}\", {_entries.Count} entries, loaded={LoadedFuel(fuel)}");
         }
@@ -171,8 +183,10 @@ namespace TravellersRestAccess
             }
 
             int before = LoadedFuel(fuel);
-            try { e.Slot.FuelClicked(); }
-            catch (System.Exception ex) { if (Main.DebugMode) DebugLogger.LogState($"FuelStation: FuelClicked error {ex.Message}"); }
+            // Add exactly one unit via the real handler (see AddOneFuelMethod) - NOT FuelClicked(),
+            // whose delegate can be double-bound and add two.
+            try { AddOneFuelMethod.Invoke(fuel, new object[] { 1, e.Slot.IHENCGDNPBL }); }
+            catch (System.Exception ex) { if (Main.DebugMode) DebugLogger.LogState($"FuelStation: add-fuel error {ex.Message}"); }
             int after = LoadedFuel(fuel);
 
             if (after > before)
