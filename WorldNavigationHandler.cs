@@ -3599,6 +3599,40 @@ namespace TravellersRestAccess
             return true;
         }
 
+        // For a bench/seat: the computed seat-slot position is often REFUSED by the game at Deselect
+        // even with canBePlaced=True - the real gate is IsObjectInValidLocation(TRUE) (round 99), and
+        // it comes back False on some slots (confirmed: 2nd bench, both table sides). Search a SMALL
+        // grid around the slot target for the nearest spot where the game actually accepts it, so the
+        // bench still lands at the table's seat but on a tile the game allows. Only checks
+        // IsObjectInValidLocation(true) (tile-based, safe to test synchronously) - canBePlaced is
+        // physics/frame-delayed and is validated later by the settle-retry.
+        public static Vector3? FindNearbyValidPlacement(Placeable placeable, Vector3 aroundPos, float maxDistance)
+        {
+            if (placeable == null) return null;
+            Vector3 original = placeable.transform.position;
+            const float step = 0.25f;
+            int range = Mathf.CeilToInt(maxDistance / step);
+            var candidates = new System.Collections.Generic.List<Vector3>();
+            for (int dx = -range; dx <= range; dx++)
+                for (int dy = -range; dy <= range; dy++)
+                {
+                    Vector3 c = new Vector3(aroundPos.x + dx * step, aroundPos.y + dy * step, original.z);
+                    if (Vector3.Distance(aroundPos, c) <= maxDistance) candidates.Add(c);
+                }
+            candidates.Sort((a, b) => Vector3.Distance(aroundPos, a).CompareTo(Vector3.Distance(aroundPos, b)));
+            Vector3? best = null;
+            foreach (var c in candidates)
+            {
+                placeable.transform.position = c;
+                Physics2D.SyncTransforms();
+                if (placeable.IsObjectInValidLocation(true)) { best = c; break; }
+            }
+            placeable.transform.position = original;
+            Physics2D.SyncTransforms();
+            if (Main.DebugMode) DebugLogger.LogState($"WorldNav: FindNearbyValidPlacement around {aroundPos} -> {(best.HasValue ? best.Value.ToString() : "none")} ({candidates.Count} candidates)");
+            return best;
+        }
+
         public static Vector3? FindNearestValidPosition(Placeable placeable, float maxDistance)
         {
             if (placeable == null) return null;

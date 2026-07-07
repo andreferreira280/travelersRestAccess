@@ -1038,7 +1038,6 @@ namespace TravellersRestAccess
                     // slot's own marker (see GetSeatTargetPosition) - using the marker directly
                     // overlapped the table every time (round 71's bug).
                     Vector3 targetPos = WorldNavigationHandler.GetSeatTargetPosition(slot, ownerTable);
-                    CursorManager.SetCursorPositionFromWorld(1, targetPos);
                     var placeable = beingPlaced.GetComponent<Placeable>();
                     if (placeable != null)
                     {
@@ -1053,8 +1052,19 @@ namespace TravellersRestAccess
                         // it searches past empty space instead. Facing the opposite of the slot's
                         // side - toward the table - is what makes that search land on it.
                         placeable.SetDirection(Utils.ABNPPDOGEPM(slot.direction), false);
+                        // The computed seat-slot tile is sometimes REFUSED by the game
+                        // (IsObjectInValidLocation(true)=False) even with canBePlaced=True - the 2nd
+                        // bench failed on BOTH table sides. Nudge the target to the nearest tile the
+                        // game actually accepts (facing is set above; validity depends on it).
+                        var validPos = WorldNavigationHandler.FindNearbyValidPlacement(placeable, targetPos, TileSize * 2f);
+                        if (validPos.HasValue) targetPos = validPos.Value;
+                        CursorManager.SetCursorPositionFromWorld(1, targetPos);
                         placeable.SetMouseOffset(Vector3.zero);
                         placeable.SetPosition(1, placeable.attachedToPlayer, placeable.snapToGrid, true);
+                    }
+                    else
+                    {
+                        CursorManager.SetCursorPositionFromWorld(1, targetPos);
                     }
                     beingPlaced.transform.position = targetPos;
                     // Round 84: same fix as HandleCursorMovement - Seat is its own independent
