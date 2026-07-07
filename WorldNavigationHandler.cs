@@ -4162,6 +4162,36 @@ namespace TravellersRestAccess
             return true;
         }
 
+        // Snap an arbitrary point (e.g. a TravelZone passage square, whose trigger centre often sits
+        // on non-walkable geometry) to the nearest tile the pathfinder can actually stand on, biased
+        // toward the player. Returns the input unchanged if it's already walkable or nothing better
+        // is found. This is why the mine passage failed ("no route") while the hot-springs passage
+        // (whose centre happens to be walkable) worked.
+        private static Vector3 SnapToWalkableTile(Vector3 pos, Vector3 playerPos, Collider2D exclude)
+        {
+            if (IsWalkableApproach(pos, exclude)) return pos;
+            Vector3[] dirs =
+            {
+                new Vector3(1, 0), new Vector3(-1, 0), new Vector3(0, 1), new Vector3(0, -1),
+                new Vector3(1, 1).normalized, new Vector3(-1, 1).normalized,
+                new Vector3(1, -1).normalized, new Vector3(-1, -1).normalized,
+            };
+            for (int ring = 1; ring <= 5; ring++)
+            {
+                Vector3? best = null;
+                float bestDist = float.MaxValue;
+                foreach (var d in dirs)
+                {
+                    Vector3 cand = pos + d * (TileSize * ring);
+                    if (!IsWalkableApproach(cand, exclude)) continue;
+                    float dist = Vector3.Distance(cand, playerPos);
+                    if (dist < bestDist) { bestDist = dist; best = cand; }
+                }
+                if (best.HasValue) return best.Value;
+            }
+            return pos;
+        }
+
         private static Vector3? FindWalkableApproach(Vector3 center, Collider2D target, Vector3 playerPos, float reach)
         {
             Vector3[] dirs =
@@ -4206,24 +4236,27 @@ namespace TravellersRestAccess
                 bool has1 = p1 != Vector3.zero;
                 bool has2 = p2 != Vector3.zero;
 
+                var zoneCollider = zone.GetComponent<Collider2D>();
+
                 // Prefer the square whose Location matches where the player currently is.
                 if (playerLoc != Location.None)
                 {
                     bool p1Here = has1 && Utils.HJPCBBGHPDA(p1) == playerLoc;
                     bool p2Here = has2 && Utils.HJPCBBGHPDA(p2) == playerLoc;
-                    if (p1Here && !p2Here) { LogZoneApproach(zone, p1, "loc-match p1"); return p1; }
-                    if (p2Here && !p1Here) { LogZoneApproach(zone, p2, "loc-match p2"); return p2; }
+                    if (p1Here && !p2Here) { var w = SnapToWalkableTile(p1, playerPos, zoneCollider); LogZoneApproach(zone, w, "loc-match p1"); return w; }
+                    if (p2Here && !p1Here) { var w = SnapToWalkableTile(p2, playerPos, zoneCollider); LogZoneApproach(zone, w, "loc-match p2"); return w; }
                 }
 
                 // Otherwise the nearest square (the player stands on their own side, so the near one).
                 if (has1 && has2)
                 {
                     Vector3 near = Vector3.Distance(playerPos, p1) <= Vector3.Distance(playerPos, p2) ? p1 : p2;
-                    LogZoneApproach(zone, near, "nearest");
-                    return near;
+                    var w = SnapToWalkableTile(near, playerPos, zoneCollider);
+                    LogZoneApproach(zone, w, "nearest");
+                    return w;
                 }
-                if (has1) { LogZoneApproach(zone, p1, "only p1"); return p1; }
-                if (has2) { LogZoneApproach(zone, p2, "only p2"); return p2; }
+                if (has1) { var w = SnapToWalkableTile(p1, playerPos, zoneCollider); LogZoneApproach(zone, w, "only p1"); return w; }
+                if (has2) { var w = SnapToWalkableTile(p2, playerPos, zoneCollider); LogZoneApproach(zone, w, "only p2"); return w; }
             }
             catch (System.Exception ex) { if (Main.DebugMode) DebugLogger.LogState($"WorldNav: GetTravelZoneApproach threw: {ex.Message}"); }
             return GetApproachPosition(zone.gameObject, playerPos);
