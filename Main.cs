@@ -48,6 +48,7 @@ namespace TravellersRestAccess
         private WorldNavigationHandler _worldNavigationHandler;
         private InventoryTransferHandler _inventoryTransferHandler;
         private DecorationModeHandler _decorationModeHandler;
+        private FuelStationHandler _fuelStationHandler;
         private float _lastGateLog; // throttle for the read-only input-gate diagnostic
 
         // "Carregando jogo..." kept getting cut off almost immediately by
@@ -81,6 +82,7 @@ namespace TravellersRestAccess
             _worldNavigationHandler = new WorldNavigationHandler();
             _inventoryTransferHandler = new InventoryTransferHandler();
             _decorationModeHandler = new DecorationModeHandler();
+            _fuelStationHandler = new FuelStationHandler();
         }
 
         private IEnumerator AnnounceStartupDelayed()
@@ -271,7 +273,13 @@ namespace TravellersRestAccess
             _inventoryTransferHandler.EnsureHotbarSelectionAnnouncer();
             CleaningDebugPatch.PollFocus();
             _decorationModeHandler.Update();
-            if (anyUiOpen) _inventoryTransferHandler.Update(_keyboardNavigator.GetCurrentSelectedGameObject());
+            _fuelStationHandler.Update();
+            // The FuelUI (oven/malt/fermentation fuel) is owned entirely by FuelStationHandler.
+            // Skip the transfer handler there so its Ctrl+Enter routing can't fire alongside the
+            // fuel add (that double-handling is what scrambled the hotbar in the reverted attempts).
+            bool fuelOpen = false;
+            try { var fu = FuelUI.Get(1); fuelOpen = fu != null && fu.IsOpen(); } catch { }
+            if (anyUiOpen && !fuelOpen) _inventoryTransferHandler.Update(_keyboardNavigator.GetCurrentSelectedGameObject());
 
             if (_dialogueAnnouncerSuppressFrames > 0)
             {

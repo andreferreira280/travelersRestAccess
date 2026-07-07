@@ -218,6 +218,13 @@ namespace TravellersRestAccess
                 }
             }
             catch { }
+
+            // Round 228: the fuel window (FuelUI - oven/malt/fermentation) is driven entirely by
+            // FuelStationHandler (a navigable list of accepted fuel types + amounts, matching the
+            // menu the user described). Skip the generic navigator so the two don't both act on
+            // the arrow keys. Detection is IsOpen() (never activeInHierarchy - the old bug).
+            try { var fuelWin = FuelUI.Get(1); if (fuelWin != null && fuelWin.IsOpen()) return; } catch { }
+
             // Arrow keys never move the character at all, even outside menus (see
             // MovementAxisPatch.SuppressArrowMovement, set permanently true in Main.cs per
             // the user's request) - WASD remains the only way to walk. Nothing to toggle
