@@ -74,7 +74,7 @@ namespace TravellersRestAccess
         private enum Amount { Whole, Half, Typed }
 
         private GameObject _focusedGameObject;
-        private bool _hotbarSelectionHooked;
+        private ActionBarInventory _hookedActionBar; // the action-bar instance we subscribed to
         // Round 101: user wants the selected hotbar (uso rápido) slot to announce its quantity
         // and update live as the item is consumed (10 candles -> 9 -> 8...). Selecting a slot
         // fires OnSelectionChanged, but USING an item doesn't - only the Stack drops - so we poll
@@ -91,12 +91,20 @@ namespace TravellersRestAccess
         // handler is constructed in Main.OnInitializeMelon.
         public void EnsureHotbarSelectionAnnouncer()
         {
-            if (!_hotbarSelectionHooked)
+            // Re-hook whenever the action-bar INSTANCE changes, not just once. An area transition
+            // recreates the player's actionBarInventory, so a one-time subscription ends up on the
+            // dead old instance and the hotbar silently stops announcing what's selected (user: "uso
+            // rápido não fala mais o que está selecionado" - appeared once area transitions worked).
+            var ab = PlayerInventory.GetPlayer(1)?.actionBarInventory;
+            if (ab == null) return;
+            if (!ReferenceEquals(ab, _hookedActionBar))
             {
-                var pi = PlayerInventory.GetPlayer(1);
-                if (pi?.actionBarInventory == null) return;
-                pi.actionBarInventory.OnSelectionChanged += OnHotbarSelectionChanged;
-                _hotbarSelectionHooked = true;
+                if (_hookedActionBar != null)
+                {
+                    try { _hookedActionBar.OnSelectionChanged -= OnHotbarSelectionChanged; } catch { }
+                }
+                ab.OnSelectionChanged += OnHotbarSelectionChanged;
+                _hookedActionBar = ab;
             }
 
             PollSelectedHotbarStack();
