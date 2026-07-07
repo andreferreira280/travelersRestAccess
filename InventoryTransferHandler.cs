@@ -267,10 +267,14 @@ namespace TravellersRestAccess
         // must take the same auto-transfer path, not the chest-container path.
         private static bool IsFuelUIOpen(int playerNum)
         {
+            // MUST use IsOpen(), NOT activeInHierarchy: a placed fuel station's FuelUI GameObject
+            // stays active in the hierarchy even when CLOSED, so activeInHierarchy was true always -
+            // which made Ctrl+Enter route EVERYTHING through the fuel auto-transfer path and scramble
+            // the hotbar/inventory (user: "uso rápido doido, modificando sozinho").
             try
             {
                 foreach (var f in UnityEngine.Object.FindObjectsOfType<FuelUI>())
-                    if (f != null && f.gameObject.activeInHierarchy) return true;
+                    if (f != null && f.IsOpen()) return true;
             }
             catch { }
             return false;

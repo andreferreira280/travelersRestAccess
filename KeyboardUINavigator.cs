@@ -225,7 +225,7 @@ namespace TravellersRestAccess
             // like the fireplace, so the right/left switch + Ctrl+Enter transfer work for fuel too.
             try
             {
-                if (UnityEngine.Object.FindObjectsOfType<FuelUI>().Any(f => f != null && f.gameObject.activeInHierarchy))
+                if (UnityEngine.Object.FindObjectsOfType<FuelUI>().Any(f => f != null && f.IsOpen()))
                 {
                     var inv = GameInventoryUI.Get(1);
                     if (inv != null && !inv.IsOpen()) { inv.OpenUI(); if (Main.DebugMode) DebugLogger.LogState("Navigator: opened inventory for FuelUI"); }
@@ -1293,8 +1293,9 @@ namespace TravellersRestAccess
                 || UnityEngine.Object.FindObjectsOfType<ModifierUI>().Any(m => m != null && m.gameObject.activeInHierarchy)
                 || UnityEngine.Object.FindObjectsOfType<AgingBarrelUI>().Any(b => b != null && b.gameObject.activeInHierarchy)
                 // FuelUI (oven/malt/fermentation fuel) uses the same two-sided layout: fuel slots on the
-                // station side, player inventory on the right to move fuel from.
-                || UnityEngine.Object.FindObjectsOfType<FuelUI>().Any(f => f != null && f.gameObject.activeInHierarchy);
+                // station side, player inventory on the right to move fuel from. IsOpen(), NOT
+                // activeInHierarchy - a placed station's FuelUI stays active when closed.
+                || UnityEngine.Object.FindObjectsOfType<FuelUI>().Any(f => f != null && f.IsOpen());
             if (craftingOpen)
             {
                 // [54] Two distinct "sides": the STATION view (GameCraftingUI/ModifierUI) shows
