@@ -163,14 +163,15 @@ namespace TravellersRestAccess
                     }
                     WorldNavigationHandler.LogTableSearchGap(seatBeforeDeselect);
                 }
+                // Do NOT Deselect() directly here - it came back False transiently even with
+                // canBePlaced=True and the table found (physics trigger list not cleared yet -
+                // "confirm placement -> False snapped=True" when placing a 2nd bench). Hand straight
+                // to the settle-retry the wall/surface path uses: it re-pins + SyncTransforms +
+                // re-Deselects for up to SettleRetryFrames until it takes (user: "o segundo banco não
+                // deixa"). This mirrors the wall path exactly (no lone first Deselect that could drop
+                // the selection before the retry starts).
                 var pendingSelectObj = SelectObject.GetPlayer(1);
-                bool placedAfterSnap = pendingSelectObj != null && pendingSelectObj.Deselect();
-                // Deselect() can come back False transiently even with canBePlaced=True and the table
-                // found - the physics trigger list hasn't cleared yet (confirmed via log: "confirm
-                // placement -> False snapped=True" when placing a 2nd bench). Instead of giving up,
-                // fall into the same settle-retry the wall/surface path uses: re-pin + SyncTransforms
-                // + re-Deselect over a few frames until it takes. (user: "o segundo banco não deixa").
-                if (!placedAfterSnap && beingPlaced != null && pendingSelectObj != null
+                if (beingPlaced != null && pendingSelectObj != null
                     && pendingSelectObj.selectedGameObject == beingPlaced)
                 {
                     _pendingSettleDeselect = beingPlaced;
@@ -180,6 +181,8 @@ namespace TravellersRestAccess
                     _pendingSettleFramesLeft = SettleRetryFrames;
                     return;
                 }
+                // Selection already gone (shouldn't normally happen) - fall back to a single try.
+                bool placedAfterSnap = pendingSelectObj != null && pendingSelectObj.Deselect();
                 HandlePlacementResult(placedAfterSnap, beingPlaced, slot);
                 return;
             }
