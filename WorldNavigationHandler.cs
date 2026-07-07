@@ -4167,23 +4167,36 @@ namespace TravellersRestAccess
         // toward the player. Returns the input unchanged if it's already walkable or nothing better
         // is found. This is why the mine passage failed ("no route") while the hot-springs passage
         // (whose centre happens to be walkable) worked.
-        private static Vector3 SnapToWalkableTile(Vector3 pos, Vector3 playerPos, Collider2D exclude)
+        private static Location SafeLoc(Vector3 p)
         {
-            if (IsWalkableApproach(pos, exclude)) return pos;
+            try { return Utils.HJPCBBGHPDA(p); } catch { return Location.None; }
+        }
+
+        // requireLoc: when set, the result tile must resolve to that Location. This is the real fix
+        // for the mine passage: the game's A* only explores nodes whose Location == the goal's, so a
+        // passage square that resolves to the DESTINATION area (Mine) is unreachable from the player's
+        // area (Quarry) - "no route" no matter how walkable it looks. Snapping to a walkable tile in
+        // the PLAYER's Location gives A* a goal it can actually reach; stepping onto it then triggers
+        // the transition. (The hot-springs passage worked by luck - its near square resolved to the
+        // player's side.)
+        private static Vector3 SnapToWalkableTile(Vector3 pos, Vector3 playerPos, Collider2D exclude, Location requireLoc = Location.None)
+        {
+            bool Ok(Vector3 p) => IsWalkableApproach(p, exclude) && (requireLoc == Location.None || SafeLoc(p) == requireLoc);
+            if (Ok(pos)) return pos;
             Vector3[] dirs =
             {
                 new Vector3(1, 0), new Vector3(-1, 0), new Vector3(0, 1), new Vector3(0, -1),
                 new Vector3(1, 1).normalized, new Vector3(-1, 1).normalized,
                 new Vector3(1, -1).normalized, new Vector3(-1, -1).normalized,
             };
-            for (int ring = 1; ring <= 5; ring++)
+            for (int ring = 1; ring <= 8; ring++)
             {
                 Vector3? best = null;
                 float bestDist = float.MaxValue;
                 foreach (var d in dirs)
                 {
                     Vector3 cand = pos + d * (TileSize * ring);
-                    if (!IsWalkableApproach(cand, exclude)) continue;
+                    if (!Ok(cand)) continue;
                     float dist = Vector3.Distance(cand, playerPos);
                     if (dist < bestDist) { bestDist = dist; best = cand; }
                 }
@@ -4237,26 +4250,29 @@ namespace TravellersRestAccess
                 bool has2 = p2 != Vector3.zero;
 
                 var zoneCollider = zone.GetComponent<Collider2D>();
+                // Force the route target onto the PLAYER's side (see SnapToWalkableTile) - the passage
+                // squares can both resolve to the destination area, which A* can't reach from here.
+                Location need = playerLoc;
 
                 // Prefer the square whose Location matches where the player currently is.
                 if (playerLoc != Location.None)
                 {
                     bool p1Here = has1 && Utils.HJPCBBGHPDA(p1) == playerLoc;
                     bool p2Here = has2 && Utils.HJPCBBGHPDA(p2) == playerLoc;
-                    if (p1Here && !p2Here) { var w = SnapToWalkableTile(p1, playerPos, zoneCollider); LogZoneApproach(zone, w, "loc-match p1"); return w; }
-                    if (p2Here && !p1Here) { var w = SnapToWalkableTile(p2, playerPos, zoneCollider); LogZoneApproach(zone, w, "loc-match p2"); return w; }
+                    if (p1Here && !p2Here) { var w = SnapToWalkableTile(p1, playerPos, zoneCollider, need); LogZoneApproach(zone, w, "loc-match p1"); return w; }
+                    if (p2Here && !p1Here) { var w = SnapToWalkableTile(p2, playerPos, zoneCollider, need); LogZoneApproach(zone, w, "loc-match p2"); return w; }
                 }
 
                 // Otherwise the nearest square (the player stands on their own side, so the near one).
                 if (has1 && has2)
                 {
                     Vector3 near = Vector3.Distance(playerPos, p1) <= Vector3.Distance(playerPos, p2) ? p1 : p2;
-                    var w = SnapToWalkableTile(near, playerPos, zoneCollider);
+                    var w = SnapToWalkableTile(near, playerPos, zoneCollider, need);
                     LogZoneApproach(zone, w, "nearest");
                     return w;
                 }
-                if (has1) { var w = SnapToWalkableTile(p1, playerPos, zoneCollider); LogZoneApproach(zone, w, "only p1"); return w; }
-                if (has2) { var w = SnapToWalkableTile(p2, playerPos, zoneCollider); LogZoneApproach(zone, w, "only p2"); return w; }
+                if (has1) { var w = SnapToWalkableTile(p1, playerPos, zoneCollider, need); LogZoneApproach(zone, w, "only p1"); return w; }
+                if (has2) { var w = SnapToWalkableTile(p2, playerPos, zoneCollider, need); LogZoneApproach(zone, w, "only p2"); return w; }
             }
             catch (System.Exception ex) { if (Main.DebugMode) DebugLogger.LogState($"WorldNav: GetTravelZoneApproach threw: {ex.Message}"); }
             return GetApproachPosition(zone.gameObject, playerPos);
