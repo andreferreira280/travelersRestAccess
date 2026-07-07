@@ -1272,6 +1272,25 @@ namespace TravellersRestAccess
                         msg = $"{itemName} colocado na superfície";
                     else
                         msg = $"{itemName} colocado";
+
+                    // Round 225: table-placement guard. If the placed item is a Table, warn when
+                    // any seat slot has no valid floor (too close to a wall) - the blind player
+                    // can't see it, and a bench would just refuse to place/associate there. Tells
+                    // them to move the table so all seat slots have room.
+                    var placedTable = beingPlaced != null ? beingPlaced.GetComponent<Table>() : null;
+                    if (placedTable != null)
+                    {
+                        var (totalSlots, blockedSlots) = WorldNavigationHandler.CountBlockedSeatSlots(placedTable);
+                        if (blockedSlots > 0)
+                        {
+                            msg += $". Atenção: {blockedSlots} de {totalSlots} vagas de banco bloqueadas por parede. Mova a mesa para longe da parede.";
+                        }
+                        else if (totalSlots > 0)
+                        {
+                            msg += $". {totalSlots} vagas de banco livres.";
+                        }
+                    }
+
                     ScreenReader.Say(msg, interrupt: true);
                 }
                 _lastSelectedGameObject = null;

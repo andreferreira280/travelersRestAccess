@@ -3940,6 +3940,31 @@ namespace TravellersRestAccess
             return slot.transform.position + Utils.NGFODNCHPHB(slot.direction) * 0.5f;
         }
 
+        // Round 225: table-placement guard. The user (blind) can't see which side of a table is
+        // against a wall, so a table placed too close leaves seat slots with no valid floor - a
+        // bench then refuses to place/associate there ("none valid"). Counts, for a just-placed
+        // Table, how many of its seat slots land on a real floor tile vs. off-floor (wall/void).
+        // Uses the game's own tile-validity check (WorldGrid.LKBLKCFOEPA, the same one that gates
+        // the front-tile ground announcement) at each slot's computed bench position - no bench
+        // Placeable is needed, so it works at table-placement time. Returns (total, blocked).
+        public static (int total, int blocked) CountBlockedSeatSlots(Table table)
+        {
+            if (table == null) return (0, 0);
+            var groups = SeatingGroupsField.GetValue(table) as SeatingGroup[];
+            if (groups == null) return (0, 0);
+            int total = 0, blocked = 0;
+            foreach (var group in groups)
+            {
+                if (group == null || group.transform == null) continue;
+                total++;
+                Vector3 seatPos = GetSeatTargetPosition(group, table);
+                bool floorOk = false;
+                try { floorOk = WorldGrid.LKBLKCFOEPA(seatPos); } catch { }
+                if (!floorOk) blocked++;
+            }
+            return (total, blocked);
+        }
+
         // Shared by BuildTargetList (nav list) and HandleSeatSlotAnnouncement (proximity
         // speech) - see the "Lugar pra banco" note above for why this reads a private field.
         // Takes the scene-wide table/seat arrays as parameters instead of scanning internally
