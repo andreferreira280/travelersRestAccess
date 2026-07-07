@@ -181,7 +181,7 @@ namespace TravellersRestAccess
                     // drifted spot is an INVALID placement tile (deselect gate: validFalse/validTrue
                     // both False even though canBePlaced=True) - which is why it "gave up". _heldIntendedPosition
                     // is the exact GetSeatTargetPosition we snapped to.
-                    _pendingSettlePos = _heldIntendedPosition;
+                    _pendingSettlePos = _heldIntendedPosition ?? beingPlaced.transform.position;
                     _pendingSettleSurface = null;
                     _pendingSettleLabel = "banco";
                     _pendingSettleFramesLeft = SettleRetryFrames;
