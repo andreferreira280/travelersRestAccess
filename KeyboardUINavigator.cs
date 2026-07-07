@@ -162,9 +162,54 @@ namespace TravellersRestAccess
             return GO(_items[_currentIndex]);
         }
 
+        // Shop "type the quantity to buy" modal state + the shop we're buying from (for the Ctrl+Enter
+        // "buy everything in the basket" shortcut).
+        private bool _shopBuyTyping;
+        private string _shopBuyBuffer = "";
+        private string _shopBuyName;
+        private ShopElementUI _shopBuyElement;
+        private ShopBaseUI _shopBase;
+
         public void Update()
         {
+            // While typing a shop buy quantity, ONLY handle that (digits/Enter/Escape) so the number
+            // keys don't move the navigation.
+            if (_shopBuyTyping) { UpdateShopBuyTyping(); return; }
+
             bool anyOpen = MainUI.IsAnyUIOpen(1);
+            // Drop the basket shortcut only once the shop is fully gone (no UI at all), so it doesn't
+            // linger into a chest's Ctrl+Enter. A brief flicker while the shop is open keeps it.
+            if (!anyOpen && GetOpenStationWindow() == null) _shopBase = null;
+
+            // Control+Enter buys EVERYTHING in the shop basket, from anywhere in the list (user wants
+            // a "Comprar" that isn't at the bottom). Only active after items were added to the basket.
+            if ((Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
+                && (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)) && Main.DebugMode)
+                DebugLogger.LogState($"Ctrl+Enter in navigator: shopBase={(_shopBase != null)} anyOpen={anyOpen}");
+            if (_shopBase != null && (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
+                && (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)))
+            {
+                var sb = _shopBase; _shopBase = null;
+                try { sb.OrderBasket(); ScreenReader.Say("Compra confirmada", interrupt: true); DebugLogger.LogInput("Ctrl+Enter", "Shop OrderBasket"); }
+                catch (System.Exception ex) { if (Main.DebugMode) DebugLogger.LogState($"OrderBasket threw: {ex.Message}"); }
+                return;
+            }
+
+            // The FIREPLACE (lareira) opens WITHOUT the player inventory (unlike the dispenser, whose
+            // OpenUI opens it too), so there was no inventory side to move fuel from and the player
+            // couldn't refuel it (user losing reputation). Open the inventory ourselves while the
+            // fireplace is open, so the right/left switch + Ctrl+Enter transfer (which already routes
+            // to the fireplace container) work. Gated on !IsOpen so it isn't reopened every frame.
+            try
+            {
+                var fpUI = FireplaceUI.Get(1);
+                if (fpUI != null && fpUI.IsOpen())
+                {
+                    var inv = GameInventoryUI.Get(1);
+                    if (inv != null && !inv.IsOpen()) { inv.OpenUI(); if (Main.DebugMode) DebugLogger.LogState("Navigator: opened inventory for FireplaceUI"); }
+                }
+            }
+            catch { }
             // Arrow keys never move the character at all, even outside menus (see
             // MovementAxisPatch.SuppressArrowMovement, set permanently true in Main.cs per
             // the user's request) - WASD remains the only way to walk. Nothing to toggle
@@ -180,7 +225,11 @@ namespace TravellersRestAccess
                 _pendingItems = null;
                 _currentIndex = -1;
                 _adjustingActive = false;
-                _editingInputField = null;
+                // MUST deactivate the Unity input field, not just drop our reference. An active
+                // TMP_InputField keeps EventSystem focus and swallows EVERY keystroke, so after the
+                // menu closed the game stopped responding to E/Q/Esc and no menu would open - only the
+                // mod's Ctrl+Enter worked (user: "só o control enter abre, nada mais funciona").
+                DeactivateEditingField();
                 // Everything fully closed - any remembered cursor position from here on is
                 // stale. Confirmed live: reopening Encyclopedia later in the same play
                 // session jumped straight to item 11/12 instead of starting at the top,
@@ -325,12 +374,15 @@ namespace TravellersRestAccess
                 Move(-1);
             }
             else if ((Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
-                && !Input.GetKey(KeyCode.LeftControl) && !Input.GetKey(KeyCode.RightControl))
+                && !Input.GetKey(KeyCode.LeftControl) && !Input.GetKey(KeyCode.RightControl)
+                && !Input.GetKey(KeyCode.LeftShift) && !Input.GetKey(KeyCode.RightShift)
+                && !Input.GetKey(KeyCode.LeftAlt) && !Input.GetKey(KeyCode.RightAlt))
             {
-                // Ctrl+Enter is the InventoryTransferHandler's transfer key - it must NOT also fire
-                // Activate here, or a crafting slot got DoAutomaticTransfer'd TWICE (navigator +
-                // transfer handler) and the two cancelled out (user: "primeiro Ctrl+Enter não coloca
-                // o ingrediente, só do segundo"). Plain Enter still activates.
+                // Ctrl/Shift/Alt+Enter are the InventoryTransferHandler's transfer keys (whole /
+                // half / typed amount) - they must NOT also fire Activate here, or a crafting slot
+                // got DoAutomaticTransfer'd TWICE (navigator + transfer handler) and the two
+                // cancelled out (user: "primeiro Ctrl+Enter não coloca o ingrediente, só do
+                // segundo"). Plain Enter still activates.
                 Activate();
             }
             // Space is intentionally NOT used to activate anything here. It kept closing
@@ -341,15 +393,41 @@ namespace TravellersRestAccess
             // advance/skip key (DialogueAnnouncer).
         }
 
+        // Deactivate the Unity input field AND release EventSystem focus, then drop our reference.
+        // Skipping any of these leaves the field grabbing all keyboard input (see the close handler).
+        private void DeactivateEditingField()
+        {
+            if (_editingInputField != null)
+            {
+                try { _editingInputField.DeactivateInputField(); } catch { }
+                if (EventSystem.current != null && EventSystem.current.currentSelectedGameObject == _editingInputField.gameObject)
+                    EventSystem.current.SetSelectedGameObject(null);
+            }
+            _editingInputField = null;
+            _editingFieldLabel = null;
+        }
+
         private void UpdateEditingInputField()
         {
+            // Safety: if the field's window CLOSED (its GameObject went inactive) WITHOUT an
+            // Enter/Escape, bail out cleanly - otherwise we stay stuck in edit mode forever and the
+            // active field keeps swallowing every key (game dead, no menus open). Only check
+            // activeInHierarchy, NOT isFocused (isFocused can be false for a frame right after
+            // ActivateInputField, which would exit editing prematurely).
+            if (_editingInputField == null || !_editingInputField.gameObject.activeInHierarchy)
+            {
+                DeactivateEditingField();
+                return;
+            }
+
             // Everything else (letters, backspace, etc.) goes straight to Unity's own
             // TMP_InputField handling, since it now has real EventSystem focus.
             if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter) || Input.GetKeyDown(KeyCode.Escape))
             {
                 string finalText = _editingInputField.text;
+                bool escaped = Input.GetKeyDown(KeyCode.Escape);
                 _editingInputField.DeactivateInputField();
-                DebugLogger.LogInput(Input.GetKeyDown(KeyCode.Escape) ? "Escape" : "Enter", "Confirm text edit");
+                DebugLogger.LogInput(escaped ? "Escape" : "Enter", "Confirm text edit");
                 _editingInputField = null;
                 // Explicit "definido" feedback so it's clear this is a confirmation, not
                 // just a passive re-read (requested - the plain value alone wasn't
@@ -575,7 +653,7 @@ namespace TravellersRestAccess
         // DrinkDispenserUI.OpenUI calls GameInventoryUI.Get(..).OpenUI()).
         // GameCraftingUI added [54]: the oven/malt are stations too - RightArrow should switch
         // to the inventory (ingredients) just like the drinks dispenser/containers do.
-        private static bool IsStationWindow(UIWindow w) => w is ContainerUI || w is DrinkDispenserUI || w is GameCraftingUI;
+        private static bool IsStationWindow(UIWindow w) => w is ContainerUI || w is DrinkDispenserUI || w is GameCraftingUI || w is AgingBarrelUI || w is FireplaceUI;
 
         private static UIWindow GetOpenStationWindow()
         {
@@ -986,6 +1064,7 @@ namespace TravellersRestAccess
                     labelReader = () => "Voltar";
                 }
 
+
                 if (mainQuestItem != null && selectable == mainQuestItem.button)
                 {
                     var capturedMainQuestItem = mainQuestItem;
@@ -1034,6 +1113,10 @@ namespace TravellersRestAccess
                 var recipeSlot = selectable.GetComponent<SlotUIRecipe>();
                 if (Main.DebugMode && (recipeListEntry != null || recipeSlot != null || selectable.gameObject.name.Contains("Recipe")))
                     DebugLogger.LogState($"CraftingNav: \"{selectable.gameObject.name}\" recipeListEntry={(recipeListEntry != null)} recipeSlot={(recipeSlot != null)}");
+                // The BUY-recipes book (RecipesBookUI) uses RecipeElementUI, not RecipeSlot, so its
+                // rows read as a bare "Button" - level/cost/buyable were silent (user: "os niveis
+                // não estão sendo lidos... não diz se da para comprar").
+                var recipeElement = selectable.GetComponent<RecipeElementUI>() ?? selectable.GetComponentInParent<RecipeElementUI>();
                 if (recipeListEntry != null && recipeListEntry.recipe != null)
                 {
                     labelReader = () => DescribeRecipeListEntry(recipeListEntry);
@@ -1042,9 +1125,51 @@ namespace TravellersRestAccess
                 {
                     labelReader = () => DescribeRecipeSlot(recipeSlot);
                 }
+                else if (recipeElement != null)
+                {
+                    labelReader = () => DescribeRecipeElement(recipeElement);
+                }
+
+                // Skills/talents menu (TalentsUI): each perk slot is a TalentSlotUI on the parent
+                // "SlotUI PlayerPerk" GameObject; the navigable child is just a "Button", so it read
+                // as bare "Button" (user: "skills ainda não lê"). Read the perk's effect + level +
+                // locked state from the parent TalentSlotUI.
+                var talentSlot = selectable.GetComponent<TalentSlotUI>() ?? selectable.GetComponentInParent<TalentSlotUI>();
+                if (talentSlot != null)
+                {
+                    labelReader = () => DescribeTalentSlot(talentSlot);
+                }
+
+                // Post box letter list row: read the SUBJECT + sender + date as you arrow through them
+                // (user: "navegando com as setas nos assuntos não [lê]... quero com as setas"), instead
+                // of only the date.
+                var letterRow = selectable.GetComponent<PostboxElementUI>() ?? selectable.GetComponentInParent<PostboxElementUI>();
+                if (letterRow != null)
+                {
+                    labelReader = () => DescribeLetterElement(letterRow);
+                }
+
+                // Post box "Erase Button" (deletes the focused letter) read as raw English (user:
+                // "esse botão não sei o q eh Erase Button"). Match by name OR on-screen text, and run
+                // AFTER letterRow so it wins for a delete button that sits inside a letter row.
+                if (selectable.gameObject.name.IndexOf("Erase", System.StringComparison.OrdinalIgnoreCase) >= 0
+                    || (UITextExtractor.GetReadableText(selectable.gameObject)?.IndexOf("Erase", System.StringComparison.OrdinalIgnoreCase) ?? -1) >= 0)
+                {
+                    labelReader = () => "Apagar carta";
+                }
+
+                // Buy/shop rows (ShopUI, incl. the recipe shop) are "OptionElement" buttons whose
+                // real data is a ShopElementUI - reads only the name by default, missing the cost
+                // (user: "não é lido nada em relação a receita e o nivel"). Read name + price here.
+                var shopElement = selectable.GetComponent<ShopElementUI>() ?? selectable.GetComponentInParent<ShopElementUI>()
+                    ?? selectable.GetComponentInChildren<ShopElementUI>();
+                if (shopElement != null && talentSlot == null)
+                {
+                    labelReader = () => DescribeShopElement(shopElement);
+                }
 
                 var slotUI = selectable.GetComponent<SlotUI>() ?? selectable.GetComponentInParent<SlotUI>();
-                if (slotUI != null && recipeListEntry == null && recipeSlot == null)
+                if (slotUI != null && recipeListEntry == null && recipeSlot == null && recipeElement == null && talentSlot == null)
                 {
                     labelReader = () => DescribeSlotUI(slotUI);
                 }
@@ -1087,6 +1212,19 @@ namespace TravellersRestAccess
                     }
                 }
 
+                // User: in the OVEN the recipe list must show ONLY the recipe entries (each
+                // announces its requirements when passed over, via DescribeRecipeListEntry) - NOT
+                // the ingredient-display rows nor a buyable "comprar" element. Skip:
+                //  - SlotUIRecipe: the "X, precisa N, você tem M" ingredient rows (pure display;
+                //    the requirements are already on the recipe entry). "andar com setas nos
+                //    ingredientes... remova essa bagunça".
+                //  - RecipeElementUI under a GameCraftingUI: the "dá pra comprar / custa X
+                //    fragmentos" row - that belongs to the recipe BOOK/shop, not the oven
+                //    ("aqui nem é a loja... esse botão dá pra comprar não serve, tire ele").
+                if (recipeSlot != null) continue;
+                if (recipeElement != null && recipeListEntry == null
+                    && selectable.GetComponentInParent<GameCraftingUI>() != null) continue;
+
                 result.Add(new NavItem
                 {
                     Anchor = selectable,
@@ -1124,7 +1262,8 @@ namespace TravellersRestAccess
             // entries (deduped against slots already covered by a Selectable wrapper, e.g. the
             // recipe list). Scoped to crafting so no other menu's behaviour changes.
             bool craftingOpen = UnityEngine.Object.FindObjectsOfType<GameCraftingUI>().Any(c => c != null && c.gameObject.activeInHierarchy)
-                || UnityEngine.Object.FindObjectsOfType<ModifierUI>().Any(m => m != null && m.gameObject.activeInHierarchy);
+                || UnityEngine.Object.FindObjectsOfType<ModifierUI>().Any(m => m != null && m.gameObject.activeInHierarchy)
+                || UnityEngine.Object.FindObjectsOfType<AgingBarrelUI>().Any(b => b != null && b.gameObject.activeInHierarchy);
             if (craftingOpen)
             {
                 // [54] Two distinct "sides": the STATION view (GameCraftingUI/ModifierUI) shows
@@ -1142,13 +1281,18 @@ namespace TravellersRestAccess
                 {
                     if (slot == null || !slot.gameObject.activeInHierarchy) continue;
                     totalFound++;
-                    bool inCrafting = slot.GetComponentInParent<GameCraftingUI>() != null
-                        || slot.GetComponentInParent<ModifierUI>() != null;
+                    bool inBarrel = slot.GetComponentInParent<AgingBarrelUI>() != null;
+                    bool inOvenCraft = !inBarrel && (slot.GetComponentInParent<GameCraftingUI>() != null
+                        || slot.GetComponentInParent<ModifierUI>() != null);
+                    bool inCrafting = inBarrel || inOvenCraft;
                     string sDesc = DescribeSlotObject(slot.gameObject);
                     bool hasItem = !string.IsNullOrEmpty(sDesc) && sDesc != "Vazio";
-                    // Station side -> only the crafting/modifier slots. Inventory side -> only the
-                    // player's non-empty item slots (the ingredients to place).
-                    bool keep = inventoryView ? (!inCrafting && hasItem) : inCrafting;
+                    // Station side -> barrel slots as before (incl. empty aging slots), but oven/malt
+                    // craft slots ONLY when they hold something - the empty "Vazio" modifier slots are
+                    // noise (user: "ocultar esses campos que ele diz Vazio, não servem"). Placement
+                    // still works via the inventory side (right) + Ctrl+Enter per the station standard.
+                    // Inventory side -> only the player's non-empty item slots (ingredients to place).
+                    bool keep = inventoryView ? (!inCrafting && hasItem) : (inBarrel || (inOvenCraft && hasItem));
                     if (!keep) { skipped++; continue; }
                     var sgo = slot.gameObject;
                     if (alreadyHave.Contains(sgo)) { skippedDup++; continue; }
@@ -1189,12 +1333,150 @@ namespace TravellersRestAccess
                 }
             }
 
+            // An OPEN post box letter shows text-only fields (date, subject, body, sender) that
+            // aren't Selectables, so the navigator only found "Voltar". Inject them as navigable
+            // items reading the ON-SCREEN PT text (user: "coloque 4 elementos... ler com as setas").
+            InjectPostboxLetterFields(result);
+            InjectYesNoDialogueText(result);
+
             // User [74][76][77]: in EVERY list, the Back ("Voltar") button must be the last
             // item; and in menus with Accept/Cancel (cooking, malt, modifiers) "Aceitar" must
             // be the penultimate and "Cancelar" the last. Applied to all windows here.
             ReorderTerminalButtons(result);
 
             return result;
+        }
+
+        // When a post box letter is OPEN, its date/subject/body/sender are plain TMP text (not
+        // Selectables), so only "Voltar" was navigable. Scan the postbox's active text fields (in
+        // PORTUGUESE, as rendered) and add each as a navigable item, so the user reads them with the
+        // arrows. Skips the letter-LIST rows (PostboxElementUI) and "Voltar"; only fires when a
+        // letter is actually open (a long body text is present).
+        // The sender of the letter currently being opened (captured from the list row, PT).
+        private static string _lastLetterSender;
+
+        // Handles the shop "type the quantity to buy" box: digits build the number, Enter buys that
+        // many (adds N to the basket then OrderBasket), Escape cancels.
+        private void UpdateShopBuyTyping()
+        {
+            if (Input.GetKeyDown(KeyCode.Escape))
+            {
+                _shopBuyTyping = false; _shopBuyElement = null;
+                ScreenReader.Announce("Compra cancelada");
+                return;
+            }
+            if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
+            {
+                _shopBuyTyping = false;
+                var el = _shopBuyElement; _shopBuyElement = null;
+                if (!int.TryParse(_shopBuyBuffer, out int n) || n <= 0) { ScreenReader.Announce("Cancelado"); return; }
+                try
+                {
+                    if (el != null && el.shopBase != null && el.shopElement != null)
+                    {
+                        // ADD to the basket (don't buy yet) - the user buys everything with Control
+                        // Enter (user: "só adicionar ao carrinho... o comprar compra tudo o q foi add").
+                        for (int i = 0; i < n; i++) el.shopBase.AddItemToBasket(el.shopElement);
+                        _shopBase = el.shopBase;
+                        ScreenReader.Say($"{n} {_shopBuyName} no carrinho. Control Enter pra comprar tudo.", interrupt: true);
+                        DebugLogger.LogInput("Enter", $"Basket +{n} x {_shopBuyName}");
+                    }
+                }
+                catch (System.Exception ex) { if (Main.DebugMode) DebugLogger.LogState($"Shop basket threw: {ex.Message}"); }
+                return;
+            }
+            if (Input.GetKeyDown(KeyCode.Backspace))
+            {
+                if (_shopBuyBuffer.Length > 0)
+                {
+                    _shopBuyBuffer = _shopBuyBuffer.Substring(0, _shopBuyBuffer.Length - 1);
+                    ScreenReader.Announce(_shopBuyBuffer.Length > 0 ? _shopBuyBuffer : "vazio");
+                }
+                return;
+            }
+            for (int d = 0; d < 10; d++)
+            {
+                if (Input.GetKeyDown(KeyCode.Alpha0 + d) || Input.GetKeyDown(KeyCode.Keypad0 + d))
+                {
+                    if (_shopBuyBuffer.Length < 4) _shopBuyBuffer += (char)('0' + d);
+                    ScreenReader.Announce(d.ToString());
+                    return;
+                }
+            }
+        }
+
+        // Remove TMP rich-text tags (e.g. "<align=left>") so the screen reader doesn't speak them.
+        private static string StripRichTags(string s)
+            => string.IsNullOrEmpty(s) ? s : System.Text.RegularExpressions.Regex.Replace(s, "<.*?>", "").Trim();
+
+        // The repair / Yes-No dialogue only exposed its Aceitar/Cancelar buttons - the QUESTION text
+        // (e.g. "Consertar por 10 madeiras?") wasn't navigable (user: "não diz o q precisa, só aparece
+        // aceitar ou cancelar"). Inject its boxText as the first navigable item.
+        private void InjectYesNoDialogueText(List<NavItem> result)
+        {
+            try
+            {
+                var dlg = MainUI.GetYesNoDialogue();
+                if (dlg == null || !dlg.IsOpen() || dlg.boxText == null) return;
+                string txt = StripRichTags(dlg.boxText.text);
+                if (string.IsNullOrWhiteSpace(txt)) return;
+                result.Insert(0, new NavItem { SlotObject = dlg.boxText.gameObject, LabelReader = () => txt });
+            }
+            catch { }
+        }
+
+        private void InjectPostboxLetterFields(List<NavItem> result)
+        {
+            try
+            {
+                // The OPEN letter is a SEPARATE window, PostboxPanelUI (the list is PostboxUI) - that's
+                // why scanning PostboxUI found nothing. Scan PostboxPanelUI for the letter's text
+                // fields (subject/date/sender/body) and make each navigable, reading the on-screen PT.
+                PostboxPanelUI panel;
+                try { panel = PostboxPanelUI.Get(1); } catch { return; }
+                if (panel == null || !panel.IsOpen()) return;
+                var tmps = panel.GetComponentsInChildren<TMPro.TMP_Text>(false);
+                if (tmps == null) return;
+                // The letter panel has exactly 3 text objects (confirmed via log): "Date", "subject",
+                // and "BigTextbox" (the body, which ends with the sender's sign-off line).
+                TMPro.TMP_Text dateT = null, subjT = null, bodyT = null;
+                foreach (var tmp in tmps)
+                {
+                    if (tmp == null) continue;
+                    switch (tmp.gameObject.name)
+                    {
+                        case "Date": dateT = tmp; break;
+                        case "subject": subjT = tmp; break;
+                        case "BigTextbox": bodyT = tmp; break;
+                    }
+                }
+                // The body is the full letter text; the sender comes from the list row (_lastLetterSender)
+                // since the letter view has no dedicated sender field (user: "coloque de fulano").
+                string body = bodyT != null ? StripRichTags(bodyT.text) : null;
+                // Strip the sender's sign-off from the END of the body so it isn't repeated (user:
+                // "o remetente ainda aparece no corpo").
+                if (!string.IsNullOrWhiteSpace(body) && !string.IsNullOrWhiteSpace(_lastLetterSender))
+                {
+                    string trimmed = body.TrimEnd();
+                    int nl = trimmed.LastIndexOf('\n');
+                    if (nl > 0 && trimmed.Substring(nl + 1).Trim().Equals(_lastLetterSender, System.StringComparison.OrdinalIgnoreCase))
+                        body = trimmed.Substring(0, nl).Trim();
+                }
+                // Build the 4 items in the user's requested order: assunto, data, remetente, corpo.
+                var items = new List<(string label, GameObject go)>();
+                if (subjT != null) items.Add(($"Assunto: {StripRichTags(subjT.text)}", subjT.gameObject));
+                if (dateT != null) items.Add(($"Data: {StripRichTags(dateT.text)}", dateT.gameObject));
+                if (!string.IsNullOrWhiteSpace(_lastLetterSender)) items.Add(($"De {_lastLetterSender}", (bodyT ?? subjT).gameObject));
+                if (!string.IsNullOrWhiteSpace(body) && bodyT != null) items.Add(($"Carta: {body}", bodyT.gameObject));
+                // Insert at the front (Voltar goes last via ReorderTerminalButtons).
+                for (int i = items.Count - 1; i >= 0; i--)
+                {
+                    string lbl = items[i].label; GameObject go = items[i].go;
+                    result.Insert(0, new NavItem { SlotObject = go, LabelReader = () => lbl });
+                }
+                if (Main.DebugMode) DebugLogger.LogState($"InjectPostboxLetterFields: added {items.Count} letter fields (sender=\"{_lastLetterSender}\")");
+            }
+            catch { }
         }
 
         // Moves the standard terminal buttons to the end of the navigation list, in the order
@@ -1396,6 +1678,183 @@ namespace TravellersRestAccess
         // it can be crafted right now, and the ingredients it needs with owned counts, so the
         // player sees the requirements BEFORE Enter crafts it (the user's "preciso de um modo para
         // ver o q a receita precisa"). Recipe.ingredientsNeeded + Recipe.IABAKHPEOAF() (name).
+        // A recipe row in the BUY-recipes book: name + quality level + fragment cost + whether it
+        // can be bought right now (RecipeElementUI.clickable). User: "os niveis não estão sendo
+        // lidos... não diz se da para comprar".
+        // Read an opened letter's full text straight from the Letter object (its subjectText +
+        // letterText are the game's own PT strings), matched via the postbox's private letters list.
+        // The on-screen letterTextBig TMP stayed empty on open (log: 0 reads), so we bypass it.
+        private static readonly System.Reflection.FieldInfo PostboxLettersListField =
+            typeof(PostboxUI).GetField("HBNEBFKKKNE", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        private static void ReadLetterDirect(PostboxElementUI el)
+        {
+            try
+            {
+                var pb = el.postboxUI;
+                if (pb == null || PostboxLettersListField == null) return;
+                var list = PostboxLettersListField.GetValue(pb) as System.Collections.IList;
+                if (list == null) return;
+                foreach (var info in list)
+                {
+                    if (info == null) continue;
+                    var t = info.GetType();
+                    var elem = t.GetField("letterElement")?.GetValue(info) as PostboxElementUI;
+                    if (elem != el) continue;
+                    var letter = t.GetField("letter")?.GetValue(info) as Letter;
+                    if (letter == null) return;
+                    string subj = letter.subjectText;
+                    string body = letter.letterText;
+                    string msg = string.IsNullOrWhiteSpace(subj) ? body : $"{subj}. {body}";
+                    if (!string.IsNullOrWhiteSpace(msg)) ScreenReader.Say(msg, interrupt: true);
+                    if (Main.DebugMode) DebugLogger.LogState($"ReadLetterDirect: subj=\"{subj}\" bodyLen={body?.Length ?? 0}");
+                    return;
+                }
+            }
+            catch (System.Exception ex) { if (Main.DebugMode) DebugLogger.LogState($"ReadLetterDirect threw: {ex.Message}"); }
+        }
+
+        // A post box letter list row: subject + sender + date (the on-screen fields the game renders).
+        private static string DescribeLetterElement(PostboxElementUI el)
+        {
+            try
+            {
+                var parts = new System.Collections.Generic.List<string>();
+                string subj = el.subjectText != null ? el.subjectText.text : null;
+                if (!string.IsNullOrWhiteSpace(subj)) parts.Add(subj);
+                string sender = el.senderName != null ? el.senderName.text : null;
+                if (!string.IsNullOrWhiteSpace(sender)) parts.Add($"de {sender}");
+                string dt = el.date != null ? el.date.text : null;
+                if (!string.IsNullOrWhiteSpace(dt)) parts.Add(dt);
+                return parts.Count > 0 ? string.Join(", ", parts) : "Carta";
+            }
+            catch { return "Carta"; }
+        }
+
+        // A shop/buy row (ShopElementUI). Reads the on-screen name + price fields; falls back to the
+        // recipe's output-item name. This is what the recipe-buy shop uses.
+        // Whether a recipe shop row can be bought right now: reputation met, affordable, not owned.
+        private static bool RecipeShopCanBuy(Recipe recipe, out int cost, out int level, out bool repOk, out bool afford)
+        {
+            cost = recipe.recipeFragments;
+            bool hasRep = recipe.reputationRequired != null;
+            level = hasRep ? recipe.reputationRequired.repNumber : 0;
+            repOk = !hasRep || recipe.reputationRequired.FENMFGFLDBO();
+            afford = cost <= RecipesManager.recipeFragments;
+            bool owned = false;
+            try { owned = RecipesManager.IsRecipeUnlocked(recipe.id, false); } catch { }
+            return repOk && afford && !owned;
+        }
+
+        // MoneyUI's coin amounts are protected TMPs (goldText/silverText/copperText) - read via
+        // reflection and format "X ouro, Y prata, Z cobre", omitting zero denominations.
+        private static readonly System.Reflection.FieldInfo MoneyUIGoldField =
+            typeof(MoneyUI).GetField("goldText", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        private static readonly System.Reflection.FieldInfo MoneyUISilverField =
+            typeof(MoneyUI).GetField("silverText", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        private static readonly System.Reflection.FieldInfo MoneyUICopperField =
+            typeof(MoneyUI).GetField("copperText", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        private static string FormatShopPrice(MoneyUI money)
+        {
+            if (money == null) return null;
+            try
+            {
+                int Read(System.Reflection.FieldInfo f) { var tmp = f?.GetValue(money) as TMPro.TMP_Text; return (tmp != null && int.TryParse(new string((tmp.text ?? "").Where(char.IsDigit).ToArray()), out int v)) ? v : 0; }
+                int g = Read(MoneyUIGoldField), s = Read(MoneyUISilverField), c = Read(MoneyUICopperField);
+                var parts = new System.Collections.Generic.List<string>();
+                if (g > 0) parts.Add($"{g} ouro");
+                if (s > 0) parts.Add($"{s} prata");
+                if (c > 0) parts.Add($"{c} cobre");
+                return parts.Count > 0 ? string.Join(", ", parts) : "0 cobre";
+            }
+            catch { return null; }
+        }
+
+        private static string DescribeShopElement(ShopElementUI el)
+        {
+            try
+            {
+                var se = el.shopElement;
+                var recipe = se != null ? se.recipe : null;
+                // Non-recipe shop row (buying items with money): keep the simple on-screen read.
+                if (recipe == null)
+                {
+                    // Item shop row (buy with money). The price is a MoneyUI (gold/silver/copper) - the
+                    // raw numbers read as "00, 02, 92" with no labels (user). Read the coin TMPs and
+                    // say them WITH the coin type, skipping zeros: "custa 2 prata, 92 cobre".
+                    string nm = (el.itemName != null && !string.IsNullOrWhiteSpace(el.itemName.text)) ? el.itemName.text : "Item";
+                    string price = FormatShopPrice(el.moneyUI);
+                    return price != null ? $"{nm}, custa {price}" : nm;
+                }
+
+                // Recipe row: read the DATA fields, not ticketPrice.text (that field shows the cost OR
+                // "Nível necessário: N" depending on lock state - the source of the confusing output).
+                string name = null;
+                try { name = se.item != null ? se.item.IABAKHPEOAF() : recipe.output.item.IABAKHPEOAF(); } catch { }
+                if (string.IsNullOrEmpty(name)) name = "Receita";
+
+                bool canBuy = RecipeShopCanBuy(recipe, out int cost, out int level, out bool repOk, out bool afford);
+                var parts = new System.Collections.Generic.List<string> { $"{name}, custa {cost} fragmento{(cost == 1 ? "" : "s")}" };
+                if (level > 0) parts.Add($"nível necessário {level}");
+                parts.Add(canBuy ? "dá pra comprar"
+                    : !repOk ? $"bloqueada, falta nível {level}"
+                    : !afford ? "bloqueada, fragmentos insuficientes"
+                    : "já desbloqueada");
+                if (Main.DebugMode) DebugLogger.LogState($"DescribeShopElement recipe=\"{name}\" cost={cost} level={level} repOk={repOk} afford={afford} canBuy={canBuy}");
+                return string.Join(", ", parts);
+            }
+            catch { return "Item"; }
+        }
+
+        // A skill/talent slot (TalentsUI). playerPerk is a PlayerPerk : Perk (Perk.description = the
+        // effect text); levelText/lockedIcon are the on-screen fields. Reads effect + level + locked.
+        private static string DescribeTalentSlot(TalentSlotUI slot)
+        {
+            try
+            {
+                var parts = new System.Collections.Generic.List<string>();
+                var pp = slot.playerPerk;
+                // Perk.description is the dev's SPANISH string (user: "está tudo em espanhol"). The
+                // LOCALIZED (Portuguese) effect text is what TalentSlotUI's own tooltip builds
+                // (TalentSlotUI.cs:185): AMICIBODAEJ() for single-value perks, IABAKHPEOAF(false,
+                // level) for multi-level ones. Mirror that; fall back to description only on error.
+                string desc = null;
+                if (pp != null)
+                {
+                    try
+                    {
+                        desc = (pp.values == null || pp.values.Length <= 1)
+                            ? pp.AMICIBODAEJ()
+                            : pp.IABAKHPEOAF(false, PerksDatabaseAccessor.GetPlayerPerkLevel(pp.id) + 1);
+                    }
+                    catch { desc = pp.description; }
+                }
+                parts.Add(string.IsNullOrWhiteSpace(desc) ? "Habilidade" : desc);
+                if (slot.levelText != null && !string.IsNullOrWhiteSpace(slot.levelText.text))
+                    parts.Add($"nível {slot.levelText.text}");
+                bool locked = slot.lockedIcon != null && slot.lockedIcon.gameObject.activeInHierarchy;
+                parts.Add(locked ? "bloqueada" : "disponível");
+                if (Main.DebugMode) DebugLogger.LogState($"DescribeTalentSlot: desc=\"{desc}\" level=\"{slot.levelText?.text}\" locked={locked}");
+                return string.Join(", ", parts);
+            }
+            catch { return "Habilidade"; }
+        }
+
+        private static string DescribeRecipeElement(RecipeElementUI el)
+        {
+            try
+            {
+                var recipe = el.GBJDNNCOIAC;
+                string name = recipe != null ? recipe.IABAKHPEOAF() : null;
+                if (string.IsNullOrEmpty(name)) name = "Receita";
+                var parts = new System.Collections.Generic.List<string> { name };
+                if (el.qualityLevel > 0) parts.Add($"qualidade {el.qualityLevel}");
+                if (recipe != null && recipe.recipeFragments > 0) parts.Add($"custa {recipe.recipeFragments} fragmentos");
+                parts.Add(el.clickable ? "dá pra comprar" : "bloqueada");
+                return string.Join(", ", parts);
+            }
+            catch { return "Receita"; }
+        }
+
         private static string DescribeRecipeListEntry(RecipeSlot entry)
         {
             var recipe = entry.recipe;
@@ -1594,7 +2053,10 @@ namespace TravellersRestAccess
             // anchor, so announce the slot's own content (item name + amount).
             if (entry.SlotObject != null)
             {
-                string slotText = DescribeSlotObject(entry.SlotObject);
+                // A custom LabelReader wins over the slot's own text (used by the injected post box
+                // letter fields, which are plain TMP GameObjects with a specific label each - without
+                // this they all read the same underlying body text, "corpo repetido").
+                string slotText = entry.LabelReader != null ? entry.LabelReader() : DescribeSlotObject(entry.SlotObject);
                 string prefix = string.IsNullOrEmpty(entry.Header) ? "" : entry.Header + ". ";
                 ScreenReader.Say($"{prefix}{slotText} ({_currentIndex + 1} of {_items.Count})", interrupt);
                 DebugLogger.LogState($"Focus: {entry.SlotObject.name} -> \"{slotText}\"");
@@ -1736,13 +2198,131 @@ namespace TravellersRestAccess
                 // Plain Enter must NOT move items - it was moving the placed ingredient back to the
                 // inventory (user: "enter está removendo; só control enter remove"). So Enter just
                 // re-announces the focused slot; the actual add/remove stays exclusively on Ctrl+Enter.
-                ScreenReader.Say(DescribeSlotObject(entry.SlotObject), interrupt: true);
+                ScreenReader.Say(entry.LabelReader != null ? entry.LabelReader() : DescribeSlotObject(entry.SlotObject), interrupt: true);
                 DebugLogger.LogInput("Enter", $"crafting slot {entry.SlotObject.name} (announce only)");
                 return;
             }
 
             var item = entry.Anchor;
             string label = entry.LabelReader != null ? entry.LabelReader() : UITextExtractor.GetReadableText(item.gameObject);
+
+            // Oven/malt recipe entry (RecipeSlot): its clickable is a UIButtonExtended (a custom
+            // Selectable driven by pointer down/up, NOT a Unity Button), so the navigator's onClick/
+            // submit never reached it and the recipe wouldn't open (user: "abrir a receita de bife no
+            // forno não funciona"). Call the game's own selection directly: OnSelect() points the
+            // shared detail panel at this recipe, then RecipeElementUI.ElementClicked() runs the real
+            // click (StartCrafting / opens ModifierUI / ChooseSlotUI for the recipe type).
+            var recipeSlotEntry = item.GetComponent<RecipeSlot>() ?? item.GetComponentInParent<RecipeSlot>();
+            if (recipeSlotEntry != null && recipeSlotEntry.recipe != null && recipeSlotEntry.recipeElementInfo != null)
+            {
+                try
+                {
+                    var info = recipeSlotEntry.recipeElementInfo;
+                    string rn = recipeSlotEntry.recipe.IABAKHPEOAF();
+                    if (string.IsNullOrEmpty(rn)) rn = "Receita";
+
+                    // Phase 1 - OPEN/SHOW the recipe (sets the shared detail panel + fills output,
+                    // ingredient, fuel and time slots). Never errors.
+                    recipeSlotEntry.OnSelect();
+
+                    // Phase 2 - PREPARE/CRAFT. ElementClicked() silently returns if fuel/ingredients
+                    // are missing (that was the "diz aberta mas não abre" - it announced success while
+                    // ElementClicked failed quietly). Read the public flags and SAY the reason instead.
+                    bool needsMods = info.needsMods;
+                    bool enoughFuel = info.CDPKJGCLAHE;
+                    bool enoughIngredients = info.FLNBPNIGDLC;
+                    // Fuel is required even for modifier recipes (ElementClicked checks it regardless),
+                    // so DON'T gate this on !needsMods - that's why "Sem combustível" wasn't spoken.
+                    if (recipeSlotEntry.recipe.fuel > 0 && !enoughFuel)
+                    { ScreenReader.Say($"{rn}. Sem combustível", interrupt: true); DebugLogger.LogInput("Enter", $"Recipe \"{rn}\": no fuel"); return; }
+                    if (!needsMods && !enoughIngredients)
+                    { ScreenReader.Say($"{rn}. Ingredientes insuficientes", interrupt: true); DebugLogger.LogInput("Enter", $"Recipe \"{rn}\": no ingredients"); return; }
+
+                    info.ElementClicked();   // needsMods -> ModifierUI (choose ingredients); else -> StartCrafting
+                    ScreenReader.Say(needsMods ? $"{rn}, escolha os ingredientes" : $"Preparando {rn}", interrupt: true);
+                    DebugLogger.LogInput("Enter", $"Recipe \"{rn}\": {(needsMods ? "opened modifier" : "started crafting")}");
+                }
+                catch (System.Exception ex) { if (Main.DebugMode) DebugLogger.LogState($"RecipeSlot open threw: {ex.Message}"); }
+                return;
+            }
+
+            // Recipe-shop row: Enter BUYS the recipe (AddItemToBasket + OrderBasket). The row's own
+            // click uses a custom button the navigator couldn't fire, so the basket stayed empty and
+            // "Comprar" did nothing (user: "comprar não funciona"). Only for recipe rows; normal item
+            // shopping keeps the default add-to-basket behaviour.
+            var shopRow = item.GetComponent<ShopElementUI>() ?? item.GetComponentInParent<ShopElementUI>()
+                ?? item.GetComponentInChildren<ShopElementUI>();
+            if (shopRow != null && shopRow.shopElement != null && shopRow.shopElement.recipe != null && shopRow.shopBase != null)
+            {
+                var recipe = shopRow.shopElement.recipe;
+                bool canBuy = RecipeShopCanBuy(recipe, out int cost, out int level, out bool repOk, out bool afford);
+                if (!canBuy)
+                {
+                    ScreenReader.Say(!repOk ? $"Bloqueada, precisa de nível {level}"
+                        : !afford ? "Fragmentos insuficientes" : "Já desbloqueada", interrupt: true);
+                    return;
+                }
+                string rn = null;
+                try { rn = shopRow.shopElement.item != null ? shopRow.shopElement.item.IABAKHPEOAF() : recipe.output.item.IABAKHPEOAF(); } catch { }
+                try
+                {
+                    shopRow.shopBase.AddItemToBasket(shopRow.shopElement);
+                    shopRow.shopBase.OrderBasket();
+                    ScreenReader.Say($"{(string.IsNullOrEmpty(rn) ? "Receita" : rn)} comprada. {RecipesManager.recipeFragments} fragmentos restantes.", interrupt: true);
+                    DebugLogger.LogInput("Enter", $"Bought recipe \"{rn}\"");
+                }
+                catch (System.Exception ex) { if (Main.DebugMode) DebugLogger.LogState($"Recipe buy threw: {ex.Message}"); }
+                return;
+            }
+            // ITEM shop row (buy with money): Enter opens a "type the quantity" box; on confirm it
+            // buys that many (user: "quando der enter para comprar, abra uma caixa pra digitar quanto").
+            if (shopRow != null && shopRow.shopElement != null && shopRow.shopElement.recipe == null && shopRow.shopBase != null)
+            {
+                _shopBuyElement = shopRow;
+                _shopBuyBuffer = "";
+                _shopBuyTyping = true;
+                string bn = null;
+                try { bn = shopRow.itemName != null ? shopRow.itemName.text : (shopRow.shopElement.item != null ? shopRow.shopElement.item.IABAKHPEOAF() : null); } catch { }
+                _shopBuyName = string.IsNullOrWhiteSpace(bn) ? "item" : bn;
+                ScreenReader.Announce($"Quantos {_shopBuyName} comprar? Digite o número, Enter confirma, Escape cancela.");
+                return;
+            }
+
+            // Post box letter: the letter list rows (PostboxElementUI) use a custom VersatileButton
+            // the navigator's click can't fire, so opening a letter never populated its body and only
+            // the date got read (user: "cartas ainda não são lidas, só o número de dias"). Call the
+            // game's OpenLetter directly; the postbox reader (HandlePostboxAnnouncement) then speaks
+            // the subject + body next frame.
+            var letterElem = item.GetComponent<PostboxElementUI>() ?? item.GetComponentInParent<PostboxElementUI>();
+            if (letterElem != null)
+            {
+                try
+                {
+                    var pb = PostboxUI.ODLPIANFFFJ(1);
+                    if (pb != null) pb.OpenLetter(letterElem.letterInt);   // open the visual letter view
+                    // The letter VIEW has no dedicated sender field (it's inside the body), so capture
+                    // the sender from the LIST row here (PT, reliable) for the 4th nav item below.
+                    _lastLetterSender = (letterElem.senderName != null && !string.IsNullOrWhiteSpace(letterElem.senderName.text))
+                        ? StripRichTags(letterElem.senderName.text) : null;
+                    DebugLogger.LogInput("Enter", $"OpenLetter {letterElem.letterInt} sender=\"{_lastLetterSender}\"");
+                }
+                catch (System.Exception ex) { if (Main.DebugMode) DebugLogger.LogState($"OpenLetter threw: {ex.Message}"); }
+                return;
+            }
+
+            // Tavern stats: the "Estatísticas da última semana" / "Estatísticas totais" rows aren't
+            // real buttons (Enter did nothing - user: "essas duas deveriam ler quando dou enter"),
+            // so read the matching stat set on demand here.
+            if (!string.IsNullOrEmpty(label))
+            {
+                string ll = label.ToLowerInvariant();
+                if (ll.Contains("estatística") || ll.Contains("estatistica"))
+                {
+                    string stats = ll.Contains("semana") ? TavernStatsPatch.WeekStatsText()
+                        : (ll.Contains("total") || ll.Contains("totais")) ? TavernStatsPatch.TotalStatsText() : null;
+                    if (!string.IsNullOrEmpty(stats)) { ScreenReader.Say(stats, interrupt: true); return; }
+                }
+            }
 
             var inputField = item.GetComponent<TMP_InputField>();
             if (inputField != null)
@@ -1777,7 +2357,14 @@ namespace TravellersRestAccess
             var toggle = item.GetComponent<Toggle>();
             var button = item.GetComponent<Button>();
 
-            if (button != null)
+            // Recipe rows (oven list + buy book) use UIButtonExtended, whose "open recipe" logic runs
+            // on the POINTER click, not the Unity Button.onClick (which is empty). Invoking onClick did
+            // nothing (user: "abrir a receita de bife no forno não funcionou"), so force the pointer
+            // sequence for recipe entries instead.
+            bool isRecipeEntry = item.GetComponent<RecipeSlot>() != null || item.GetComponentInParent<RecipeSlot>() != null
+                || item.GetComponent<RecipeElementUI>() != null || item.GetComponentInParent<RecipeElementUI>() != null;
+
+            if (button != null && !isRecipeEntry)
             {
                 button.onClick.Invoke();
             }

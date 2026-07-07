@@ -21,6 +21,9 @@ batendo em item.wav - bater em obstáculo (não-parede)
 limpou.wav          - algo limpo / objetivo concluído
 baú/cama/mesa/torneira.wav - itens específicos por perto
 porta/poço/madeira/metal/pedra.wav - sons de zona/aproximação
+correio.wav - CAIXA DE CORREIO: toca a cada 1s quando você está perto, com posição
+              (esquerda/direita) e tom (agudo se acima, grave se abaixo). Já ligado
+              no código; falta só o arquivo .wav.
 
 ====================================================================
 NOVOS - SOM POR FERRAMENTA (ao usar a ferramenta com sucesso)

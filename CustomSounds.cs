@@ -40,7 +40,7 @@ namespace TravellersRestAccess
         // madeira (wood workshop), metal (metal workshop), pedra (stone workshop).
         // Keyed by the same name used in PlayZoneSound calls.
         private static readonly Dictionary<string, AudioClip> _zoneClips = new Dictionary<string, AudioClip>();
-        private static readonly string[] KnownZoneSoundNames = { "porta", "poço", "madeira", "metal", "pedra" };
+        private static readonly string[] KnownZoneSoundNames = { "porta", "poço", "madeira", "metal", "pedra", "correio" };
 
         // Distinct audio cue per tool ACTION (user: "cada ferramenta não tem seu som?"). File names
         // the user must drop in the Mods folder (see sons.txt). Silent if a file is missing.
@@ -156,6 +156,15 @@ namespace TravellersRestAccess
         {
             if (!_zoneClips.TryGetValue(zoneName, out var clip) || clip == null) return;
             PlayOneShot(clip);
+        }
+
+        // Same as PlayZoneSound but panned/pitched toward the object's direction (left/right pan,
+        // higher pitch above / lower below) - used for the post box proximity cue. Muted with any UI.
+        public static void PlayZoneSoundDirectional(string zoneName, float pan, float pitch)
+        {
+            if (MuteActive) return;
+            if (!_zoneClips.TryGetValue(zoneName, out var clip) || clip == null) return;
+            PlayOneShot(clip, pan, pitch);
         }
 
         // Distinct cue for a tool action (key = "cavar"/"arar"/... see KnownToolSoundNames).

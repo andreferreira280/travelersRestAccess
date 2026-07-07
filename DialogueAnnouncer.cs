@@ -63,6 +63,14 @@ namespace TravellersRestAccess
         private static readonly string[] KnownHudPaths =
         {
             "TimeAndWeather", "PlayerMoney", "TavernInfoUIRight", "Version Number",
+            // The player's money HUD (path "...PlayerRPG/MoneyText.../CopperText") changed and got
+            // read as bare numbers like "42" after every serve (user: "numeros aleatorios tipo 42,
+            // não é quantidade"). It's a HUD counter - the player checks money on F2, so filter it.
+            "PlayerRPG", "MoneyText",
+            // Loading-screen rotating tips ("MenuUI/TitleScreen/Loading Bar/Tips") were being read as
+            // dialogue every area transition, on a loop (user: "fica repetindo as dicas infinito").
+            // They're a HUD overlay, not game dialogue - filter the whole Loading Bar subtree.
+            "Loading Bar",
         };
 
         private readonly Dictionary<int, string> _lastAnnounced = new Dictionary<int, string>();
@@ -151,7 +159,7 @@ namespace TravellersRestAccess
             // near-identical Y values for all of them, making position-based ordering flicker
             // frame to frame (sibling index is what Unity layout groups actually use, stable
             // regardless of layout direction).
-            var found = Object.FindObjectsOfType<Button>()
+            var found = Object.FindObjectsByType<Button>(FindObjectsSortMode.None)
                 .Where(b => b.gameObject.activeInHierarchy && b.interactable && HierarchyPath(b.transform).Contains("Response Menu Panel"))
                 .OrderBy(b => b.transform.GetSiblingIndex())
                 .ToList();
@@ -236,7 +244,7 @@ namespace TravellersRestAccess
             // world-space TextMeshPro) - user reported a message appearing after clicking a
             // table to clean it that's never read; a floating world-space feedback popup
             // (not a UI element) would have been invisible to the narrower UI-only scan.
-            var labels = Object.FindObjectsOfType<TMP_Text>()
+            var labels = Object.FindObjectsByType<TMP_Text>(FindObjectsSortMode.None)
                 .Where(t => t.gameObject.activeInHierarchy && !string.IsNullOrWhiteSpace(t.text))
                 .ToList();
 
@@ -282,6 +290,11 @@ namespace TravellersRestAccess
                         var audioInfo = WorldNavigationHandler.GetNearestInteractionAudioInfo();
                         string targetName = audioInfo?.name;
                         string promptText = string.IsNullOrEmpty(targetName) ? stripped : $"{targetName}: {stripped}";
+                        // Announce the GAME's own key (E/Q). The user confirmed the game keys E and Q
+                        // already work for world interactions (signs, doors, harvesting), so we must
+                        // NOT tell them Ctrl+Enter here - that's reserved for inventory/stations
+                        // (user: "a tecla e e a tecla q já estavam funcionando... control/shift enter
+                        // só para inv e estações").
                         if (!string.IsNullOrEmpty(key)) promptText += $" (tecla {key})";
                         CustomSounds.PlayItemNearby(audioInfo?.name, audioInfo?.pitch ?? 1f, audioInfo?.pan ?? 0f);
                         ScreenReader.Say($"Próximo: {promptText}", interrupt: false);
@@ -329,6 +342,12 @@ namespace TravellersRestAccess
                 }
             }
 
+            // Diagnostic (user: "nem aparece mais o E ou Q"): log when the set of detected action
+            // prompts CHANGES, so we can confirm whether "[E]/[Q]" prompts are being SEEN near an
+            // object at all (detection) vs. seen-but-suppressed. Fires only on change (low spam).
+            if (Main.DebugMode && !actionPromptsThisScan.SetEquals(_activeActionPrompts))
+                DebugLogger.LogState($"ActionPrompts detected: [{string.Join(" | ", actionPromptsThisScan)}]");
+
             // Replace wholesale: anything missing from this scan is gone, so walking back
             // up to the SAME interactable later announces it again instead of staying
             // silent forever; anything still present stays suppressed (no repeats).
@@ -357,7 +376,7 @@ namespace TravellersRestAccess
 
         private void LogStrayClickables()
         {
-            foreach (var clickable in Object.FindObjectsOfType<MonoBehaviour>().OfType<IPointerClickHandler>())
+            foreach (var clickable in Object.FindObjectsByType<MonoBehaviour>(FindObjectsSortMode.None).OfType<IPointerClickHandler>())
             {
                 var behaviour = (MonoBehaviour)clickable;
                 if (behaviour == null || !behaviour.gameObject.activeInHierarchy) continue;
@@ -419,7 +438,7 @@ namespace TravellersRestAccess
 
         private static Button GetContinueButton()
         {
-            foreach (var button in Object.FindObjectsOfType<Button>())
+            foreach (var button in Object.FindObjectsByType<Button>(FindObjectsSortMode.None))
             {
                 if (button.gameObject.name == "Continue Button" && button.gameObject.activeInHierarchy)
                 {
@@ -476,8 +495,18 @@ namespace TravellersRestAccess
             // User's explicit request (rodada 134h): "oculte as conversas ao redor da cidade".
             // Bark UI is the floating ambient-chatter bubble system - never a conversation
             // directed at the player (real dialogue goes through the subtitle/response UI, not
-            // Bark UI). So filter ALL of them now, not just the original three NPC names.
-            return path.Contains("Bark UI");
+            // Bark UI). So filter ALL of them... EXCEPT inside the tavern (rodada 163): there the
+            // barks ARE the customers talking, and the user wants to hear them ("dentro da taverna
+            // tire o filtro das mensagens dos clientes"). City barks stay hidden.
+            // Two ambient systems: the floating "Bark UI" chatter AND the NPCs' own speech-bubble
+            // subtitles ("Npcs/<Name>NPC/Bubble Template Standard UI Subtitle Panel") - the city
+            // NPCs talking among themselves (user: "oculte as conversas paralelas sem ser as q sejam
+            // comigo"). A real conversation WITH the player uses "Canvas/Dialogue UI/...", never these.
+            bool isBark = path.Contains("Bark UI");
+            bool isNpcBubble = path.Contains("Npcs/") && path.Contains("Bubble Template");
+            if (!isBark && !isNpcBubble) return false;
+            try { if (PlayerController.GetPlayer(1)?.LEOIMFNKFGA == Location.Tavern) return false; } catch { }
+            return true;
         }
 
         private static string HierarchyPath(Transform t)

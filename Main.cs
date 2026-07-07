@@ -48,6 +48,7 @@ namespace TravellersRestAccess
         private WorldNavigationHandler _worldNavigationHandler;
         private InventoryTransferHandler _inventoryTransferHandler;
         private DecorationModeHandler _decorationModeHandler;
+        private float _lastGateLog; // throttle for the read-only input-gate diagnostic
 
         // "Carregando jogo..." kept getting cut off almost immediately by
         // DialogueAnnouncer announcing the loading screen's tip text (confirmed: MainUI
@@ -207,7 +208,60 @@ namespace TravellersRestAccess
 
         private void UpdateHandlers()
         {
+            // While the typed-amount modal (Alt+Enter) is active, ONLY it runs - the digit/Enter/
+            // Escape keys must not leak into the navigator or world handlers (mirrors the
+            // navigator's own _editingInputField gate).
+            if (_inventoryTransferHandler.IsTypingAmount)
+            {
+                _inventoryTransferHandler.UpdateTypingAmount();
+                return;
+            }
+
             bool anyUiOpen = MainUI.IsAnyUIOpen(1);
+
+            // NOTE: an earlier "input unstick / input-blocker" experiment lived here (it read and
+            // cleared PlayerInputs.inputBlockers and the EventSystem selection every frame to recover
+            // a stuck E/Q/Esc gate). It was REMOVED: the mod-disabled test proved that block was what
+            // HUNG area transitions (leaving the tavern) and added per-frame cost. The mod must not
+            // touch the game's input-blocker bookkeeping.
+            //
+            // READ-ONLY diagnostic (NO mutation): logs the input gate + stuck blockers once/second so
+            // we can see WHAT is left blocking input after an area transition, without touching it.
+            if (DebugMode && !anyUiOpen && Time.unscaledTime - _lastGateLog > 1f)
+            {
+                _lastGateLog = Time.unscaledTime;
+                try
+                {
+                    var pi = PlayerInputs.GetPlayer(1);
+                    if (pi != null && !PlayerInputs.InputsEnabled(1) && pi.inputBlockers != null)
+                    {
+                        var parts = new System.Collections.Generic.List<string>();
+                        foreach (var mb in pi.inputBlockers) parts.Add(mb == null ? "null" : $"{mb.GetType().Name}:{mb.gameObject.name}");
+                        DebugLogger.LogState($"GateRead: InputsEnabled=False blockers=[{string.Join(", ", parts)}]");
+
+                        // ROOT-CAUSE PROBE (read-only). The stuck input/movement blockers (TitleScreen
+                        // at load, TravelZone after leaving an area) are BOTH released only once the
+                        // destination area's terrain build finishes: TitleScreen.LoadingSeasonTilesProgressBar
+                        // waits on TitleScreen.allTerrainUpdated (set by the Road TilemapScene terrain
+                        // coroutine), and the TravelZone fade-in coroutine (LFDIBPFMMAK) waits on
+                        // TilemapScene.updatingTerrain going false. If that one terrain coroutine never
+                        // completes, BOTH symptoms appear (menus dead + can't change area). This logs the
+                        // exact terrain/fade state so the next single test proves whether the terrain
+                        // build is stuck (progress frozen => coroutine aborted) or the fade is stuck.
+                        LogTransitionDiagnostic();
+                    }
+                }
+                catch { }
+            }
+
+            // While ANY area is mid terrain-build (initial world load OR an area transition), the game
+            // keeps the player's input+movement blocked until the build finishes. The mod has nothing
+            // useful to do in that window, and its heavy per-frame work (world scans + F12 debug logging
+            // = disk I/O) was STARVING the frame-bound terrain build: progress crawled ~0.001/s so it
+            // effectively never finished, the blockers never released, and everything stayed frozen
+            // (menus dead + can't leave an area). Skip ALL handlers during the build so it gets full
+            // frames and completes quickly. Input is blocked anyway, so nothing is lost.
+            if (WorldNavigationHandler.AnyTerrainUpdating()) return;
 
             _keyboardNavigator.Update();
             _worldNavigationHandler.Update(anyUiOpen);
@@ -226,6 +280,50 @@ namespace TravellersRestAccess
             }
 
             _dialogueAnnouncer.Update(anyUiOpen);
+        }
+
+        /// <summary>
+        /// Read-only probe (NO mutation). Logs the terrain-build + fade state during a stuck
+        /// input-gate window so we can see WHY the blockers never clear. Called only in DebugMode,
+        /// throttled to once/second, and only while input is disabled (the stuck window).
+        /// </summary>
+        private void LogTransitionDiagnostic()
+        {
+            // TitleScreen loading gate: the title/loading blocker is removed only after
+            // allTerrainUpdated flips true. If progress is frozen below 1, the Road terrain
+            // coroutine aborted mid-loop (an exception the game swallows - not in this log).
+            try
+            {
+                var ts = TitleScreen.GetInstance();
+                if (ts != null)
+                    DebugLogger.LogState($"DIAG: TitleScreen.allTerrainUpdated={ts.allTerrainUpdated} progress={ts.allTerrainUpdatedProgress:F3}");
+            }
+            catch { }
+
+            // Per-area terrain build state: any scene still 'updatingTerrain' is what the
+            // TravelZone fade-in coroutine blocks on. A scene stuck at updatingTerrain=true is
+            // the smoking gun.
+            try
+            {
+                var mgr = TravelZonesManager.GGFJGHHHEJC;
+                if (mgr != null && mgr.allTilemapScenes != null)
+                {
+                    var busy = new System.Collections.Generic.List<string>();
+                    foreach (var kv in mgr.allTilemapScenes)
+                        if (kv.Value != null && kv.Value.updatingTerrain) busy.Add(kv.Key.ToString());
+                    DebugLogger.LogState($"DIAG: updatingTerrain scenes=[{string.Join(", ", busy)}]");
+                }
+            }
+            catch { }
+
+            // Fade state: distinguishes 'stuck before fade-in' (terrain) from 'fade never finishes'.
+            try
+            {
+                var fc = FadeCamera.GetPlayer(1);
+                if (fc != null)
+                    DebugLogger.LogState($"DIAG: Fade isFading={fc.IsFading()} isBlack={fc.IsBlack()} isClear={fc.IsClear()}");
+            }
+            catch { }
         }
 
         #endregion

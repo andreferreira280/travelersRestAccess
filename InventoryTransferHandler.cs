@@ -49,11 +49,17 @@ namespace TravellersRestAccess
             _focusedGameObject = focusedGameObject;
             bool ctrl = Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl);
             bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+            bool enterDown = Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter);
 
-            if (ctrl && Input.GetKeyDown(KeyCode.Return))
+            // Stack transfer keys: Ctrl+Enter = whole stack, Shift+Enter = half, Ctrl+Shift+Enter =
+            // type an exact amount. (Alt+Enter was the plan but Unity/Windows eats it as the
+            // fullscreen-toggle shortcut, so it never reached us - user: "alt enter não abre".)
+            // Ctrl+Shift is checked FIRST so it doesn't fall through to the whole/half branch.
+            if (enterDown)
             {
-                HandleContainerTransfer();
-                return;
+                if (ctrl && shift) { HandleContainerTransfer(Amount.Typed); return; }
+                if (ctrl) { HandleContainerTransfer(Amount.Whole); return; }
+                if (shift) { HandleContainerTransfer(Amount.Half); return; }
             }
 
             for (int i = 0; i < HotbarKeys.Length; i++)
@@ -64,6 +70,8 @@ namespace TravellersRestAccess
                 else if (shift) HandleReturnFromHotbar(i);
             }
         }
+
+        private enum Amount { Whole, Half, Typed }
 
         private GameObject _focusedGameObject;
         private bool _hotbarSelectionHooked;
@@ -110,7 +118,13 @@ namespace TravellersRestAccess
             if (stack < _polledHotbarStack)
             {
                 _polledHotbarStack = stack;
-                ScreenReader.Say(stack > 0 ? stack.ToString() : "acabou", interrupt: true);
+                // Include the item name so the count has context (user: "numeros ditos depois de
+                // servir ainda não dizem do q se trata"). E.g. "19 Bife grelhado" / "Bife acabou".
+                string nm = slot?.itemInstance?.LHBPOPOIFLE()?.IABAKHPEOAF();
+                string msg = stack > 0
+                    ? (string.IsNullOrEmpty(nm) ? stack.ToString() : $"{stack} {nm}")
+                    : (string.IsNullOrEmpty(nm) ? "acabou" : $"{nm} acabou");
+                ScreenReader.Say(msg, interrupt: true);
             }
             else if (stack > _polledHotbarStack)
             {
@@ -208,11 +222,16 @@ namespace TravellersRestAccess
             // GetCurrentOpenWindows — check IsOpen() directly first.
             var ddUI = DrinkDispenserUI.Get(playerNum);
             if (ddUI != null && ddUI.IsOpen()) return true;
+            // The FIREPLACE (lareira) is a Container that sets MainUI.SetCurrentContainer, but its UI
+            // wasn't recognized as a station, so transfers were refused and the fuel stayed in the
+            // inventory (user: "lareira não funciona padrão... itens adicionados ainda aparecem no
+            // inventario"). Recognize FireplaceUI so the GetCurrentContainer fallback returns it.
+            try { var fpUI = FireplaceUI.Get(playerNum); if (fpUI != null && fpUI.IsOpen()) return true; } catch { }
             var windows = MainUI.GetCurrentOpenWindows(playerNum);
             if (windows == null) return false;
             foreach (var w in windows)
             {
-                if (w is DrinkDispenserUI) return true;
+                if (w is DrinkDispenserUI || w is FireplaceUI) return true;
             }
             return false;
         }
@@ -222,8 +241,11 @@ namespace TravellersRestAccess
         // Only called on a Ctrl+Enter keypress, so the scan cost is negligible.
         private static bool IsCraftingUIOpen()
         {
-            var crafting = UnityEngine.Object.FindObjectsOfType<GameCraftingUI>();
-            foreach (var c in crafting)
+            // NOTE: the aging barrel is NO LONGER matched here - it's handled first by
+            // GetOpenAgingBarrel() (with a proper IsOpen() check). Matching it here by
+            // activeInHierarchy wrongly fired for a closed tavern barrel and hijacked other
+            // stations (dispenser) into DoAutomaticTransfer.
+            foreach (var c in UnityEngine.Object.FindObjectsOfType<GameCraftingUI>())
                 if (c != null && c.gameObject.activeInHierarchy) return true;
             return false;
         }
@@ -249,9 +271,20 @@ namespace TravellersRestAccess
             return Array.IndexOf(playerInventory.inventory.slots, slot) >= 0;
         }
 
-        private void HandleContainerTransfer()
+        private void HandleContainerTransfer(Amount amount)
         {
             const int playerNum = 1;
+
+            // Aging barrel: handled BEFORE the crafting branch. The barrel isn't a Container, and
+            // routing it through SlotUI.DoAutomaticTransfer was the "18 entra, 18 sai, 2 de cada
+            // vez" bug (the game's auto-transfer fires unpredictably). We move an exact amount in/out
+            // via the barrel's own inputSlot array instead, which also lets Shift/Alt work here.
+            var barrel = GetOpenAgingBarrel();
+            if (barrel != null)
+            {
+                HandleBarrelTransfer(playerNum, barrel, amount);
+                return;
+            }
 
             // [54] Oven / crafting station: a Crafter is NOT a Container - ingredients aren't held
             // in station slots like a chest. The game shift-clicks them into the recipe's
@@ -259,19 +292,31 @@ namespace TravellersRestAccess
             // crafting UI is open, Ctrl+Enter on the focused slot runs that transfer (same action
             // Enter does in the navigator), giving the uniform "Ctrl+Enter adiciona / remove" the
             // user expects at EVERY station - the chest-container path below would just say
-            // "Nenhuma estação aberta" since there's no Container to find.
+            // "Nenhuma estação aberta" since there's no Container to find. Modifier slots aren't
+            // stackable in the way half/typed care about, so all amounts do the same auto-transfer.
             if (_focusedGameObject != null && IsCraftingUIOpen())
             {
                 var craftSlot = _focusedGameObject.GetComponent<SlotUI>() ?? _focusedGameObject.GetComponentInParent<SlotUI>();
                 if (craftSlot != null)
                 {
-                    try { craftSlot.DoAutomaticTransfer(playerNum); }
-                    catch (System.Exception ex) { if (Main.DebugMode) DebugLogger.LogState($"InventoryTransfer: oven DoAutomaticTransfer threw: {ex.Message}"); }
-                    if (Main.DebugMode) DebugLogger.LogState($"InventoryTransfer: Ctrl+Enter oven auto-transfer on \"{_focusedGameObject.name}\"");
+                    Slot cs = GetFocusedSlot();
+                    // The game's DoAutomaticTransfer moves only 1-2 units per call ("de dois em
+                    // dois"). The user wants EVERY container to move the same way - the WHOLE stack
+                    // (or half / typed) in one keypress. So we LOOP DoAutomaticTransfer until the
+                    // requested amount has moved (or the source empties / the station stops
+                    // accepting, e.g. a recipe slot that's now full). Same keys, same feel as a chest.
+                    if (amount == Amount.Typed)
+                    {
+                        BeginTypedAmount(playerNum, cs, "movido", n => CraftAutoMove(playerNum, craftSlot, cs, n));
+                        return;
+                    }
+                    int want = cs == null || cs.itemInstance == null ? 0
+                        : amount == Amount.Half ? Math.Max(1, cs.Stack / 2) : cs.Stack;
+                    int movedCraft = CraftAutoMove(playerNum, craftSlot, cs, want);
+                    if (Main.DebugMode) DebugLogger.LogState($"InventoryTransfer: crafting {amount} auto-transfer moved={movedCraft} on \"{_focusedGameObject.name}\"");
                     // Announce what's now in the modifier + whether it's ready (instead of a blind
                     // "movido"). Note: the game routes an inventory item into the FOCUSED modifier
-                    // slot - the first Ctrl+Enter on an unfocused slot only focuses it, so the state
-                    // may read unchanged until a second press (known game quirk, to be smoothed later).
+                    // slot - the first press on an unfocused slot may only focus it.
                     string state = KeyboardUINavigator.CraftingModifierState();
                     ScreenReader.Say(string.IsNullOrEmpty(state) ? "Ingrediente movido" : state, interrupt: true);
                     return;
@@ -320,11 +365,230 @@ namespace TravellersRestAccess
             // slot[1]=cups) before falling back to the full container-level AddItemInstance path.
             if (!sourceIsStation && target is DrinkDispenser dispenser)
             {
+                // Dispenser slots are tiny (liquid/cups) - half/typed rarely apply, so keep the
+                // whole-transfer direct path; it stops at slot capacity anyway.
                 if (TryMoveToDispenserSlot(playerNum, sourceSlot, dispenser, actionLabel))
                     return;
             }
 
-            MoveStack(playerNum, sourceSlot, target, actionLabel);
+            if (amount == Amount.Typed)
+            {
+                Container capturedTarget = target;
+                BeginTypedAmount(playerNum, sourceSlot, actionLabel,
+                    n => MoveUnitsToContainer(playerNum, sourceSlot, capturedTarget, n));
+                return;
+            }
+
+            int units = amount == Amount.Half ? Math.Max(1, sourceSlot.Stack / 2) : int.MaxValue;
+            if (Main.DebugMode) DebugLogger.LogState($"InventoryTransfer: container {amount} sourceIsStation={sourceIsStation} target={target?.GetType().Name} units={(units == int.MaxValue ? "todos" : units.ToString())} srcStack={sourceSlot.Stack}");
+            MoveStack(playerNum, sourceSlot, target, actionLabel, units);
+        }
+
+        // Aging barrel: move an EXACT amount between the player's inventory and the barrel's own
+        // inputSlot array (a public Slot[] on AgingBarrel), bypassing the buggy DoAutomaticTransfer.
+        // Direction: a source slot that IS one of the barrel's inputSlots goes OUT to the inventory;
+        // any other (inventory) slot goes IN, filling the barrel's input slots in order.
+        private void HandleBarrelTransfer(int playerNum, AgingBarrel barrel, Amount amount)
+        {
+            Slot sourceSlot = GetFocusedSlot();
+            if (sourceSlot == null || sourceSlot.itemInstance == null)
+            {
+                if (Main.DebugMode) DebugLogger.LogState("InventoryTransfer: barrel transfer - no focused slot with an item");
+                return;
+            }
+            var playerInventory = PlayerInventory.GetPlayer(playerNum);
+            if (playerInventory == null) return;
+
+            var inputSlots = barrel.inputSlot;
+            bool sourceIsBarrel = inputSlots != null && Array.IndexOf(inputSlots, sourceSlot) >= 0;
+            string actionLabel = sourceIsBarrel ? "retirado do barril" : "colocado no barril";
+            // Use ALL of the barrel's inputSlots - FEEOFAGCONJ itself accepts/rejects each (empty/
+            // capacity/type). The old cap at barrel.agingSlotsNum was WRONG: agingSlotsNum is 0 for an
+            // EMPTY barrel, so the cap rejected everything and said "cheio/Sem espaço" on an empty
+            // barrel (user). The dispenser mix-up that cap tried to help was really fixed by the
+            // GetOpenAgingBarrel IsOpen() check, so the cap is just harmful here.
+            int usable = inputSlots?.Length ?? 0;
+            if (Main.DebugMode) DebugLogger.LogState($"InventoryTransfer: barrel {(sourceIsBarrel ? "OUT" : "IN")} slots={usable} agingSlotsNum={barrel.agingSlotsNum} srcStack={sourceSlot.Stack}");
+
+            // A mover that transfers up to N units and returns how many actually moved.
+            Func<int, int> mover;
+            if (sourceIsBarrel)
+            {
+                mover = n => MoveUnitsToContainer(playerNum, sourceSlot, playerInventory.inventory, n);
+            }
+            else
+            {
+                mover = n =>
+                {
+                    if (inputSlots == null) return 0;
+                    int total = 0;
+                    for (int i = 0; i < usable && total < n; i++)
+                    {
+                        if (inputSlots[i] == null) continue;
+                        int m = MoveUnitsToSlot(playerNum, sourceSlot, inputSlots[i], n - total);
+                        total += m;
+                        if (Main.DebugMode) DebugLogger.LogState($"InventoryTransfer: barrel IN slot[{i}] moved={m} (total={total})");
+                        if (sourceSlot.itemInstance == null) break;
+                    }
+                    return total;
+                };
+            }
+
+            if (amount == Amount.Typed)
+            {
+                BeginTypedAmount(playerNum, sourceSlot, actionLabel, mover);
+                return;
+            }
+
+            string itemName = ItemName(sourceSlot);
+            int req = amount == Amount.Half ? Math.Max(1, sourceSlot.Stack / 2) : sourceSlot.Stack;
+            int original = sourceSlot.Stack;
+            int moved = mover(req);
+            AnnounceMove(itemName, actionLabel, moved, Math.Min(original, req));
+        }
+
+        // Moves EXACTLY `want` units from a crafting-station slot (oven/malt/menu-table), one unit at
+        // a time. SlotUI.DoAutomaticTransfer fires OnAutomaticTransfer TWICE per call (SlotUI.cs:117),
+        // which is the "de dois em dois" - asking for 15 landed on 16. We invoke OnAutomaticTransfer
+        // ONCE per unit instead (a public Action<int,Slot> on SlotUI), so each step moves exactly 1
+        // and we can stop precisely at `want`. Stops early if the source empties or a call makes no
+        // progress twice (station full / recipe slot capped; tolerates 1 focus-only first call).
+        private static int CraftAutoMove(int playerNum, SlotUI craftSlot, Slot source, int want)
+        {
+            if (craftSlot == null || want <= 0) return 0;
+            Slot uiSlot = craftSlot.IHENCGDNPBL ?? source;
+            if (uiSlot == null || uiSlot.itemInstance == null) return 0;
+            int moved = 0, guard = 0, noProgress = 0;
+            while (guard++ < 300 && moved < want)
+            {
+                int before = uiSlot.itemInstance != null ? uiSlot.Stack : 0;
+                if (before <= 0) break;
+                try { craftSlot.OnAutomaticTransfer(playerNum, uiSlot); }
+                catch (System.Exception ex) { if (Main.DebugMode) DebugLogger.LogState($"InventoryTransfer: OnAutomaticTransfer threw: {ex.Message}"); break; }
+                int after = uiSlot.itemInstance != null ? uiSlot.Stack : 0;
+                int delta = before - after;
+                if (delta <= 0) { if (++noProgress >= 2) break; continue; }
+                noProgress = 0;
+                moved += delta;
+            }
+            return moved;
+        }
+
+        private static string ItemName(Slot slot)
+        {
+            string n = slot?.itemInstance?.LHBPOPOIFLE()?.IABAKHPEOAF();
+            return string.IsNullOrEmpty(n) ? "Item" : n;
+        }
+
+        private static void AnnounceMove(string itemName, string actionLabel, int moved, int requested)
+        {
+            if (moved <= 0)
+            {
+                ScreenReader.Say("Sem espaço", interrupt: true);
+                return;
+            }
+            string message = moved < requested
+                ? $"{itemName} {actionLabel} ({moved} de {requested})"
+                : $"{itemName} {actionLabel} ({moved})";
+            ScreenReader.Say(message, interrupt: true);
+        }
+
+        private static AgingBarrel GetOpenAgingBarrel()
+        {
+            // MUST use IsOpen(), not activeInHierarchy: a placed aging barrel in the tavern keeps its
+            // UI GameObject active in the hierarchy even when closed, so activeInHierarchy matched it
+            // while the DRINK DISPENSER was the actually-open window - hijacking the dispenser
+            // transfer into the barrel path (log: "barrel IN usableSlots=0/1", then "Sem espaço").
+            foreach (var ui in UnityEngine.Object.FindObjectsOfType<AgingBarrelUI>())
+                if (ui != null && ui.IsOpen() && ui.agingBarrel != null)
+                    return ui.agingBarrel;
+            return null;
+        }
+
+        // ---- Typed-amount modal (Alt+Enter) ----
+        // No game numeric-input UI exists, so this is a tiny self-contained modal: while active,
+        // Main.cs routes ONLY UpdateTypingAmount() (gating the navigator/world handlers) so the
+        // digit keys can't leak into other controls. Enter commits (clamped 1..max), Escape cancels.
+        private bool _typingAmount;
+        private string _amountBuffer = "";
+        private int _amountMax;
+        private string _amountLabel;
+        private string _amountItemName;
+        private Func<int, int> _amountMover;
+
+        public bool IsTypingAmount => _typingAmount;
+
+        private void BeginTypedAmount(int playerNum, Slot sourceSlot, string actionLabel, Func<int, int> mover)
+        {
+            if (sourceSlot?.itemInstance == null) return;
+            _typingAmount = true;
+            _amountBuffer = "";
+            _amountMax = sourceSlot.Stack;
+            _amountLabel = actionLabel;
+            _amountItemName = ItemName(sourceSlot);
+            _amountMover = mover;
+            ScreenReader.Say($"Digite a quantidade de {_amountItemName}, no máximo {_amountMax}. Enter confirma, Escape cancela.", interrupt: true);
+        }
+
+        private static readonly KeyCode[] DigitKeys =
+        {
+            KeyCode.Alpha0, KeyCode.Alpha1, KeyCode.Alpha2, KeyCode.Alpha3, KeyCode.Alpha4,
+            KeyCode.Alpha5, KeyCode.Alpha6, KeyCode.Alpha7, KeyCode.Alpha8, KeyCode.Alpha9,
+        };
+        private static readonly KeyCode[] KeypadDigitKeys =
+        {
+            KeyCode.Keypad0, KeyCode.Keypad1, KeyCode.Keypad2, KeyCode.Keypad3, KeyCode.Keypad4,
+            KeyCode.Keypad5, KeyCode.Keypad6, KeyCode.Keypad7, KeyCode.Keypad8, KeyCode.Keypad9,
+        };
+
+        // Called by Main.cs every frame while IsTypingAmount is true, INSTEAD of the other handlers.
+        public void UpdateTypingAmount()
+        {
+            if (Input.GetKeyDown(KeyCode.Escape))
+            {
+                _typingAmount = false;
+                ScreenReader.Say("Cancelado", interrupt: true);
+                return;
+            }
+
+            if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
+            {
+                CommitTypedAmount();
+                return;
+            }
+
+            if (Input.GetKeyDown(KeyCode.Backspace))
+            {
+                if (_amountBuffer.Length > 0)
+                {
+                    _amountBuffer = _amountBuffer.Substring(0, _amountBuffer.Length - 1);
+                    ScreenReader.Say(_amountBuffer.Length > 0 ? _amountBuffer : "vazio", interrupt: true);
+                }
+                return;
+            }
+
+            for (int d = 0; d < 10; d++)
+            {
+                if (Input.GetKeyDown(DigitKeys[d]) || Input.GetKeyDown(KeypadDigitKeys[d]))
+                {
+                    if (_amountBuffer.Length < 4) _amountBuffer += (char)('0' + d);
+                    ScreenReader.Say(d.ToString(), interrupt: true);
+                    return;
+                }
+            }
+        }
+
+        private void CommitTypedAmount()
+        {
+            _typingAmount = false;
+            if (!int.TryParse(_amountBuffer, out int n) || n <= 0)
+            {
+                ScreenReader.Say("Quantidade inválida, cancelado", interrupt: true);
+                return;
+            }
+            int requested = Math.Min(n, _amountMax);
+            int moved = _amountMover != null ? _amountMover(requested) : 0;
+            AnnounceMove(_amountItemName, _amountLabel, moved, requested);
         }
 
         private void HandleAssignToHotbar(int hotbarIndex)
@@ -440,10 +704,10 @@ namespace TravellersRestAccess
         // does the same loop but doesn't report how many actually fit) lets us know exactly
         // how much to remove from the source, in case the target doesn't have room for the
         // whole stack.
-        private static int MoveUnitsToContainer(int playerNum, Slot sourceSlot, Container target)
+        private static int MoveUnitsToContainer(int playerNum, Slot sourceSlot, Container target, int maxUnits = int.MaxValue)
         {
             var item = sourceSlot.itemInstance;
-            int originalCount = sourceSlot.Stack;
+            int originalCount = Math.Min(sourceSlot.Stack, maxUnits);
             int moved = 0;
 
             for (int i = 0; i < originalCount; i++)
@@ -460,10 +724,10 @@ namespace TravellersRestAccess
         // (the hotbar slot) instead of asking a Container to pick one - Slot.FEEOFAGCONJ is
         // the same single-unit "try to add" primitive Container.AddItemInstance itself calls
         // internally, just applied directly instead of via a container-wide search.
-        private static int MoveUnitsToSlot(int playerNum, Slot sourceSlot, Slot targetSlot)
+        private static int MoveUnitsToSlot(int playerNum, Slot sourceSlot, Slot targetSlot, int maxUnits = int.MaxValue)
         {
             var item = sourceSlot.itemInstance;
-            int originalCount = sourceSlot.Stack;
+            int originalCount = Math.Min(sourceSlot.Stack, maxUnits);
             int moved = 0;
 
             for (int i = 0; i < originalCount; i++)
@@ -507,11 +771,11 @@ namespace TravellersRestAccess
             return false;
         }
 
-        private static void MoveStack(int playerNum, Slot sourceSlot, Container target, string actionLabel)
+        private static void MoveStack(int playerNum, Slot sourceSlot, Container target, string actionLabel, int maxUnits = int.MaxValue)
         {
             var item = sourceSlot.itemInstance;
-            int originalCount = sourceSlot.Stack;
-            int moved = MoveUnitsToContainer(playerNum, sourceSlot, target);
+            int originalCount = Math.Min(sourceSlot.Stack, maxUnits);
+            int moved = MoveUnitsToContainer(playerNum, sourceSlot, target, maxUnits);
 
             if (moved <= 0)
             {

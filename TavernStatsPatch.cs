@@ -3,50 +3,63 @@ using HarmonyLib;
 namespace TravellersRestAccess
 {
     /// <summary>
-    /// Announces tavern statistics whenever the player opens one of the two stats
-    /// screens inside the main panel (L key). Both TavernStatsUI methods load their
-    /// respective data and update the UI text fields — patching their postfix means
-    /// the data is guaranteed to be fresh when we read it.
-    /// DGPPDBFJFNF = last-6-sessions window + all-time total.
-    /// ELLPIGEHAFH = last-4-sessions window.
+    /// Reads the tavern statistics screen aloud. The old patch targeted DGPPDBFJFNF/ELLPIGEHAFH,
+    /// which the live log proved never fire (they are obfuscator DECOY clones - garbage constants,
+    /// never called). The REAL display method is TavernStatsUI.UpdateInfo() - it populates every
+    /// stat field from TavernServiceManager.GetWeekStats()/GetAllTimeStats(), so we Postfix it and
+    /// read the same data on open. The two section labels ("última semana" / "totais") aren't real
+    /// buttons, so the navigator reads them on demand via WeekStatsText()/TotalStatsText().
     /// </summary>
     public static class TavernStatsPatch
     {
         public static void Apply(HarmonyLib.Harmony harmony)
         {
-            harmony.Patch(
-                AccessTools.Method(typeof(TavernStatsUI), "DGPPDBFJFNF"),
-                postfix: new HarmonyMethod(typeof(TavernStatsPatch), nameof(WeeklyStatsPostfix)));
-
-            harmony.Patch(
-                AccessTools.Method(typeof(TavernStatsUI), "ELLPIGEHAFH"),
-                postfix: new HarmonyMethod(typeof(TavernStatsPatch), nameof(TotalStatsPostfix)));
+            var target = AccessTools.Method(typeof(TavernStatsUI), "UpdateInfo");
+            if (target != null)
+                harmony.Patch(target, postfix: new HarmonyMethod(typeof(TavernStatsPatch), nameof(UpdateInfoPostfix)));
         }
 
-        static void WeeklyStatsPostfix()
+        public static string WeekStatsText()
         {
-            var tsm = TavernServiceManager.JFJOKGAOPHA();
-            if (tsm == null) return;
-            var recent = tsm.DAKEIGNBBBD();
-            var total = tsm.FEPCCIHJPEH();
-            int level = TavernReputation.GetMilestone();
-            string text = $"Nível {level}. " +
-                          $"Semana: {recent.customersCount} clientes, {recent.satisfiedCustomers} satisfeitos, {recent.kickedCustomers} expulsos. " +
-                          $"Total: {total.customersCount} clientes, {total.satisfiedCustomers} satisfeitos, {total.kickedCustomers} expulsos.";
-            ScreenReader.Say(text, interrupt: true);
-            if (Main.DebugMode) DebugLogger.LogState($"TavernStats DGPPDBFJFNF: level={level}, recent={recent.customersCount}/{recent.satisfiedCustomers}/{recent.kickedCustomers}, total={total.customersCount}/{total.satisfiedCustomers}/{total.kickedCustomers}");
+            try
+            {
+                var tsm = TavernServiceManager.GGFJGHHHEJC;
+                if (tsm == null) return null;
+                var w = tsm.GetWeekStats();
+                return $"Semana: {w.customersCount} clientes, {w.satisfiedCustomers} satisfeitos, " +
+                       $"{w.kickedCustomers} expulsos, receita {w.totalIncome}, custo {w.staffCost}, lucro {w.profit}.";
+            }
+            catch { return null; }
         }
 
-        static void TotalStatsPostfix()
+        public static string TotalStatsText()
         {
-            var tsm = TavernServiceManager.JFJOKGAOPHA();
-            if (tsm == null) return;
-            var stats = tsm.GEMIEGAFJMI();
-            int level = TavernReputation.GetMilestone();
-            string text = $"Nível {level}. " +
-                          $"Sessões recentes: {stats.customersCount} clientes, {stats.satisfiedCustomers} satisfeitos, {stats.kickedCustomers} expulsos.";
-            ScreenReader.Say(text, interrupt: true);
-            if (Main.DebugMode) DebugLogger.LogState($"TavernStats ELLPIGEHAFH: level={level}, stats={stats.customersCount}/{stats.satisfiedCustomers}/{stats.kickedCustomers}");
+            try
+            {
+                var tsm = TavernServiceManager.GGFJGHHHEJC;
+                if (tsm == null) return null;
+                var a = tsm.GetAllTimeStats();
+                return $"Total: {a.customersCount} clientes, {a.satisfiedCustomers} satisfeitos, " +
+                       $"{a.kickedCustomers} expulsos, receita {a.totalIncome}, custo {a.staffCost}, lucro {a.profit}.";
+            }
+            catch { return null; }
+        }
+
+        static void UpdateInfoPostfix()
+        {
+            try
+            {
+                int level = TavernReputation.GetMilestone();
+                string week = WeekStatsText();
+                string total = TotalStatsText();
+                if (week == null && total == null) return;
+                ScreenReader.Say($"Reputação nível {level}. {week} {total}", interrupt: true);
+                if (Main.DebugMode) DebugLogger.LogState($"TavernStats UpdateInfo read: level={level}");
+            }
+            catch (System.Exception ex)
+            {
+                if (Main.DebugMode) DebugLogger.LogState($"TavernStatsPatch threw: {ex.Message}");
+            }
         }
     }
 }

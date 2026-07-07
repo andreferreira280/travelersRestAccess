@@ -44,6 +44,10 @@ namespace TravellersRestAccess
             {
                 if (MainUI.IsAnyUIOpen(1)) return;
 
+                // Don't touch the world grid while an area is mid terrain-build (load/transition):
+                // input is disabled then anyway, and this keeps our grid reads off a half-built area.
+                if (WorldNavigationHandler.AnyTerrainUpdating()) return;
+
                 var item = PlayerInventory.GetPlayer(1)?.actionBarInventory?.GetSelectedItem();
                 if (!(item is Hoe || item is Spade || item is WateringCan || item is Seed)) return;
 
