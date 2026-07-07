@@ -182,19 +182,24 @@ namespace TravellersRestAccess
                 return;
             }
 
-            int before = LoadedFuel(fuel);
+            int fuelBefore = LoadedFuel(fuel);
+            int availBefore = AvailableInInventory(e.Slot);
             // Add exactly one unit via the real handler (see AddOneFuelMethod) - NOT FuelClicked(),
             // whose delegate can be double-bound and add two.
             try { AddOneFuelMethod.Invoke(fuel, new object[] { 1, e.Slot.IHENCGDNPBL }); }
             catch (System.Exception ex) { if (Main.DebugMode) DebugLogger.LogState($"FuelStation: add-fuel error {ex.Message}"); }
-            int after = LoadedFuel(fuel);
+            int fuelAfter = LoadedFuel(fuel);
+            int availAfter = AvailableInInventory(e.Slot);
+            int consumed = availBefore - availAfter;
 
-            if (after > before)
-                ScreenReader.Say($"{name} adicionado. {after} colocado, {AvailableInInventory(e.Slot)} restante", interrupt: true);
+            // Announce in ITEMS (how many you have left), not the raw fuel counter - a single item
+            // can be worth more than one "fuel" unit, which read as "adding two at a time".
+            if (fuelAfter > fuelBefore || consumed > 0)
+                ScreenReader.Say($"{name} adicionado. {availAfter} no inventário.", interrupt: true);
             else
                 ScreenReader.Say($"Não consegui adicionar {name}", interrupt: true);
 
-            if (Main.DebugMode) DebugLogger.LogState($"FuelStation: add \"{name}\" fuel {before} -> {after}");
+            if (Main.DebugMode) DebugLogger.LogState($"FuelStation: add \"{name}\" - items consumed={consumed} (avail {availBefore}->{availAfter}), fuel {fuelBefore}->{fuelAfter}");
         }
     }
 }
