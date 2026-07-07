@@ -48,6 +48,7 @@ namespace TravellersRestAccess
         private WorldNavigationHandler _worldNavigationHandler;
         private InventoryTransferHandler _inventoryTransferHandler;
         private DecorationModeHandler _decorationModeHandler;
+        private FuelStationHandler _fuelStationHandler;
         private float _lastGateLog; // throttle for the read-only input-gate diagnostic
 
         // "Carregando jogo..." kept getting cut off almost immediately by
@@ -81,6 +82,7 @@ namespace TravellersRestAccess
             _worldNavigationHandler = new WorldNavigationHandler();
             _inventoryTransferHandler = new InventoryTransferHandler();
             _decorationModeHandler = new DecorationModeHandler();
+            _fuelStationHandler = new FuelStationHandler();
         }
 
         private IEnumerator AnnounceStartupDelayed()
@@ -271,6 +273,7 @@ namespace TravellersRestAccess
             _inventoryTransferHandler.EnsureHotbarSelectionAnnouncer();
             CleaningDebugPatch.PollFocus();
             _decorationModeHandler.Update();
+            _fuelStationHandler.Update();
             if (anyUiOpen) _inventoryTransferHandler.Update(_keyboardNavigator.GetCurrentSelectedGameObject());
 
             if (_dialogueAnnouncerSuppressFrames > 0)
