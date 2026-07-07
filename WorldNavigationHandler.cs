@@ -4500,6 +4500,19 @@ namespace TravellersRestAccess
             return name;
         }
 
+        // Round 226: public name resolver for the decoration pick-up menu. Prefers the stable
+        // seat/table numbering the rest of the mod already uses ("Banco 9", "Mesa 2") so the
+        // spoken list matches the placement announcements; falls back to the item/scenery name.
+        public static string DescribeDecorationName(Placeable placeable)
+        {
+            if (placeable == null) return "objeto";
+            var seat = FindSeatForPlaceable(placeable.gameObject);
+            if (seat != null) return $"Banco {GetSeatNumber(seat)}";
+            var table = placeable.GetComponent<Table>();
+            if (table != null) return $"Mesa {GetTableNumber(table)}";
+            return DescribePlaceable(placeable);
+        }
+
         private static readonly Dictionary<string, string> FallbackNameTranslations = new Dictionary<string, string>
         {
             // Confirmed wrong via log: interacting with this opens "DrinkDispenserUI"

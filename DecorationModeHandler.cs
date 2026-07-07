@@ -280,9 +280,13 @@ namespace TravellersRestAccess
                 // same global numbering as the proximity announcement/nav list
                 // (WorldNavigationHandler.GetSeatNumber) so the number means the same thing.
                 var grabbedSeat = WorldNavigationHandler.FindSeatForPlaceable(selectObj.selectedGameObject);
-                string holdMsg = grabbedSeat != null
-                    ? $"Banco {WorldNavigationHandler.GetSeatNumber(grabbedSeat)} pego. Use as setas pra mover, Enter pra soltar."
-                    : "Item pego. Use as setas pra mover, Enter pra soltar.";
+                // Round 226: name the grabbed object (Mesa/Banco/item) so it matches what the
+                // pick-up menu just announced, instead of a generic "Item pego".
+                var grabbedPlaceableForName = selectObj.selectedGameObject.GetComponent<Placeable>();
+                string grabbedName = grabbedPlaceableForName != null
+                    ? WorldNavigationHandler.DescribeDecorationName(grabbedPlaceableForName)
+                    : "Item";
+                string holdMsg = $"{grabbedName} pego. Use as setas pra mover, Enter pra soltar.";
                 ScreenReader.Say(holdMsg, interrupt: true);
                 _lastGuidanceTileOffset = null;
                 _wasdReminderGivenThisHold = false;
@@ -739,11 +743,13 @@ namespace TravellersRestAccess
         // entirely for the grab step.
         private const float GrabRadius = TileSize * 3f;
 
-        private void HandleGrab(SelectObject selectObj)
-        {
-            if (!Input.GetKeyDown(KeyCode.Return) && !Input.GetKeyDown(KeyCode.KeypadEnter)) return;
+        // Round 226: nearby placeables the pick-up menu is currently browsing. Selection is
+        // tracked by object reference (not index) so it stays on the same physical object even
+        // when the distance-sorted list is rebuilt on each browse press.
+        private Placeable _grabSelected;
 
-            Vector3 playerPos = PlayerController.GetPlayerPosition(1);
+        private System.Collections.Generic.List<Placeable> BuildGrabCandidates(Vector3 playerPos)
+        {
             Collider2D[] hits = Physics2D.OverlapCircleAll(playerPos, GrabRadius);
             var candidates = new System.Collections.Generic.List<Placeable>();
             foreach (var hit in hits)
@@ -753,18 +759,74 @@ namespace TravellersRestAccess
                 candidates.Add(placeable);
             }
             candidates.Sort((a, b) => Vector3.Distance(playerPos, a.transform.position).CompareTo(Vector3.Distance(playerPos, b.transform.position)));
+            return candidates;
+        }
 
-            if (candidates.Count == 0)
+        // Round 226: name + direction/distance of a grab candidate, so the blind player knows
+        // exactly which object (and where) they're about to pick up before pressing Enter.
+        private string DescribeGrabTarget(Placeable p, Vector3 playerPos)
+        {
+            string name = WorldNavigationHandler.DescribeDecorationName(p);
+            Vector3 d = p.transform.position - playerPos;
+            int tx = Mathf.RoundToInt(Mathf.Abs(d.x) / TileSize);
+            int ty = Mathf.RoundToInt(Mathf.Abs(d.y) / TileSize);
+            var parts = new System.Collections.Generic.List<string>();
+            if (tx > 0) parts.Add($"{tx} pra {(d.x > 0 ? "direita" : "esquerda")}");
+            if (ty > 0) parts.Add($"{ty} pra {(d.y > 0 ? "cima" : "baixo")}");
+            string where = parts.Count > 0 ? string.Join(", ", parts) : "bem perto";
+            return $"{name}, {where}";
+        }
+
+        private void HandleGrab(SelectObject selectObj)
+        {
+            Vector3 playerPos = PlayerController.GetPlayerPosition(1);
+
+            // Round 226: browse the nearby objects by NAME with Page Up/Down instead of blindly
+            // grabbing the closest one (the "pega o tapete em vez da mesa" problem). Each press
+            // rebuilds the distance-sorted list and moves the selection to the next/previous
+            // object, announcing its name and direction. Enter (below) then picks up exactly the
+            // browsed selection.
+            bool pageDown = Input.GetKeyDown(KeyCode.PageDown);
+            bool pageUp = Input.GetKeyDown(KeyCode.PageUp);
+            if (pageDown || pageUp)
             {
-                ScreenReader.Say("Nada pra pegar aqui perto de você", interrupt: true);
+                var list = BuildGrabCandidates(playerPos);
+                if (list.Count == 0)
+                {
+                    _grabSelected = null;
+                    ScreenReader.Say("Nada pra pegar aqui perto de você", interrupt: true);
+                    return;
+                }
+                int idx = _grabSelected != null ? list.IndexOf(_grabSelected) : -1;
+                if (idx < 0) idx = pageDown ? 0 : list.Count - 1;
+                else idx = pageDown ? (idx + 1) % list.Count : (idx - 1 + list.Count) % list.Count;
+                _grabSelected = list[idx];
+                ScreenReader.Say($"{idx + 1} de {list.Count}: {DescribeGrabTarget(_grabSelected, playerPos)}. Enter pra pegar.", interrupt: true);
                 return;
             }
 
-            // User's explicit report: heard "Banco" announced nearby, tried to grab, but the
-            // CLOSEST Placeable turned out to be something unrelated and unselectable (a
-            // "Grifo"/torneira, confirmed by log) - so the grab failed even though the actual
-            // bench was right there too, just a bit further away. Trying every candidate in
-            // distance order instead of giving up after the single closest one.
+            if (!Input.GetKeyDown(KeyCode.Return) && !Input.GetKeyDown(KeyCode.KeypadEnter)) return;
+
+            var candidates = BuildGrabCandidates(playerPos);
+
+            if (candidates.Count == 0)
+            {
+                _grabSelected = null;
+                ScreenReader.Say("Nada pra pegar aqui perto de você. Use Page Down pra listar objetos.", interrupt: true);
+                return;
+            }
+
+            // Round 226: if the player browsed to a specific object, pick up THAT one - move it to
+            // the front of the try-order. Otherwise keep the old "closest first" behavior.
+            // Trying every candidate in distance order (not giving up after the closest) still
+            // covers the case where the preferred object refuses selection for some reason.
+            if (_grabSelected != null && candidates.Contains(_grabSelected))
+            {
+                candidates.Remove(_grabSelected);
+                candidates.Insert(0, _grabSelected);
+            }
+            _grabSelected = null;
+
             Placeable grabbed = null;
             foreach (var candidate in candidates)
             {
