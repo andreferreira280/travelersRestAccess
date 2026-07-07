@@ -165,6 +165,21 @@ namespace TravellersRestAccess
                 }
                 var pendingSelectObj = SelectObject.GetPlayer(1);
                 bool placedAfterSnap = pendingSelectObj != null && pendingSelectObj.Deselect();
+                // Deselect() can come back False transiently even with canBePlaced=True and the table
+                // found - the physics trigger list hasn't cleared yet (confirmed via log: "confirm
+                // placement -> False snapped=True" when placing a 2nd bench). Instead of giving up,
+                // fall into the same settle-retry the wall/surface path uses: re-pin + SyncTransforms
+                // + re-Deselect over a few frames until it takes. (user: "o segundo banco não deixa").
+                if (!placedAfterSnap && beingPlaced != null && pendingSelectObj != null
+                    && pendingSelectObj.selectedGameObject == beingPlaced)
+                {
+                    _pendingSettleDeselect = beingPlaced;
+                    _pendingSettlePos = beingPlaced.transform.position;
+                    _pendingSettleSurface = null;
+                    _pendingSettleLabel = "banco";
+                    _pendingSettleFramesLeft = SettleRetryFrames;
+                    return;
+                }
                 HandlePlacementResult(placedAfterSnap, beingPlaced, slot);
                 return;
             }

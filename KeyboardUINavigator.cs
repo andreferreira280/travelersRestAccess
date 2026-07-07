@@ -109,7 +109,7 @@ namespace TravellersRestAccess
         // unaffected - only how fast a CHANGED list is noticed, which 0.12s covers fine.
         private float _lastCollectTime;
         private List<NavItem> _lastFreshItems;
-        private const float CollectInterval = 0.12f;
+        private const float CollectInterval = 0.2f;
         public int ItemCount => _items.Count;
         private List<NavItem> _pendingItems;
         private float _pendingSince;
