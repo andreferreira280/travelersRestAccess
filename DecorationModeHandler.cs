@@ -175,7 +175,13 @@ namespace TravellersRestAccess
                     && pendingSelectObj.selectedGameObject == beingPlaced)
                 {
                     _pendingSettleDeselect = beingPlaced;
-                    _pendingSettlePos = beingPlaced.transform.position;
+                    // Re-pin to the SLOT TARGET, not beingPlaced.transform.position: by the time this
+                    // deferred handler runs, the game's WhileSelected has already drifted the bench off
+                    // the slot (log: settled at y=906.98 but the slot target was y=906.75), and that
+                    // drifted spot is an INVALID placement tile (deselect gate: validFalse/validTrue
+                    // both False even though canBePlaced=True) - which is why it "gave up". _heldIntendedPosition
+                    // is the exact GetSeatTargetPosition we snapped to.
+                    _pendingSettlePos = _heldIntendedPosition;
                     _pendingSettleSurface = null;
                     _pendingSettleLabel = "banco";
                     _pendingSettleFramesLeft = SettleRetryFrames;
