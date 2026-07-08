@@ -1195,6 +1195,15 @@ namespace TravellersRestAccess
                     labelReader = () => DescribeSlotUI(slotUI);
                 }
 
+                // Notice-board ORDERS (OrderQuestUI): each order is an OrderQuestElementUI whose
+                // required item lives in the quest, not the slot's itemInstance (which read null in
+                // the log). Read the order directly so the blind player hears what it wants + reward.
+                var orderElement = selectable.GetComponentInParent<OrderQuestElementUI>();
+                if (orderElement != null)
+                {
+                    labelReader = () => DescribeOrderElement(orderElement);
+                }
+
                 var ownInputField = selectable.GetComponent<TMP_InputField>();
                 if (ownInputField != null)
                 {
@@ -1667,6 +1676,40 @@ namespace TravellersRestAccess
             typeof(ColorButton).GetField("_material", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         private static readonly System.Reflection.FieldInfo ColorButtonSpriteColorField =
             typeof(ColorButton).GetField("_spriteColor", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+        // Reads one notice-board order (OrderQuestUI). The required item is on the quest
+        // (AINAHCLIAFF.INKJOLLEBGI()), not the slot's itemInstance; amount is requiredAmount; reward
+        // is reward.reputationPoints. currentQuestElement distinguishes an accepted order from an
+        // available one.
+        private static string DescribeOrderElement(OrderQuestElementUI element)
+        {
+            try
+            {
+                if (element == null) return "Pedido";
+                string kind = element.currentQuestElement ? "Pedido atual" : "Pedido disponível";
+                var quest = element.AINAHCLIAFF;
+                if (quest == null) return $"{kind} vazio";
+
+                string itemName = null;
+                try
+                {
+                    var items = quest.INKJOLLEBGI();
+                    if (items != null && items.Length > 0 && items[0] != null) itemName = items[0].IABAKHPEOAF();
+                }
+                catch { }
+                if (string.IsNullOrEmpty(itemName)) itemName = "item";
+
+                int amount = 1;
+                try { amount = quest.requiredAmount; } catch { }
+                int rep = 0;
+                try { rep = quest.reward.reputationPoints; } catch { }
+
+                string s = $"{kind}: {amount} de {itemName}";
+                if (rep != 0) s += $", recompensa {rep} de reputação";
+                return s;
+            }
+            catch { return "Pedido"; }
+        }
 
         private static string DescribeSlotUI(SlotUI slotUI)
         {
