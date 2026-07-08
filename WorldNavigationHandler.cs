@@ -46,7 +46,7 @@ namespace TravellersRestAccess
         // request, and a new "Repositivos" category for placed consumables that are working but
         // will need restocking (candles). Associated benches leave "Pendentes" automatically (see
         // BuildTargetList - only unassociated benches are listed now).
-        private static readonly string[] CategoryOrder = { "Portas", "Comerciantes", "NPCs", "Pendentes", "Repositivos", "Containers", "Máquinas", "Cultivo", "Materiais", "Coletáveis", "Decorativos" };
+        private static readonly string[] CategoryOrder = { "Portas", "Comerciantes", "NPCs", "Animais", "Pendentes", "Repositivos", "Containers", "Máquinas", "Cultivo", "Materiais", "Coletáveis", "Decorativos" };
 
         // The town/region merchants and what each sells (from the wiki, provided by the user). Used to
         // put them in their own "Comerciantes" category (out of "NPCs") with a description, and to let
@@ -168,6 +168,12 @@ namespace TravellersRestAccess
         private bool _isInitialPathRequest;
         private Vector3 _lastRequestFrom;
         private Vector3 _lastRequestTo;
+        // User (round 236): after reaching a tracked resource (ore, etc.), the NEXT target must not
+        // be the same one - and a rock you just broke shouldn't linger in the guide. Records where
+        // you last arrived; the nav list hides any target on that spot until you walk away from it.
+        private Vector3? _recentlyReachedPos;
+        private const float ReachedSkipRadius = 0.75f;
+        private const float ReachedClearDist = 1.5f;
         private bool _isRetryAttempt;
 
         // Multi-area routing: when the final target is in a different Location, we first
@@ -1002,11 +1008,12 @@ namespace TravellersRestAccess
                 {
                     _guidanceActive = false;
                     _fineMode = false;
+                    MarkReached(targetPos);
                     return "Você chegou";
                 }
                 return $"{Mathf.Max(Mathf.Abs(cx), Mathf.Abs(cy))} pra {Direction8FromOffsets(cx, cy)}";
             }
-            if (distToTarget <= FinalArrivalRadius) { _guidanceActive = false; return "Você chegou"; }
+            if (distToTarget <= FinalArrivalRadius) { _guidanceActive = false; MarkReached(targetPos); return "Você chegou"; }
 
             // Turn-by-turn: aim at the first waypoint a short hop ahead (skip ones we're standing on),
             // take the 8-way heading toward it, then EXTEND the leg while the path keeps that same
@@ -2846,6 +2853,13 @@ namespace TravellersRestAccess
         private List<(string name, Vector3 position, string category)> BuildTargetList()
         {
             Vector3 pp = PlayerController.GetPlayerPosition(1);
+            // Once the player walks away from the spot they just reached, stop hiding it (the
+            // resource may still be there, or a new one spawned) - and force a rebuild so it returns.
+            if (_recentlyReachedPos.HasValue && Vector3.Distance(pp, _recentlyReachedPos.Value) > ReachedClearDist)
+            {
+                _recentlyReachedPos = null;
+                _targetDirty = true;
+            }
             if (_targetCache != null && !_targetDirty && Vector3.Distance(pp, _targetCacheCenter) < 3f)
                 return _targetCache;
             float t0 = Main.DebugMode ? Time.realtimeSinceStartup : 0f;
@@ -2855,6 +2869,19 @@ namespace TravellersRestAccess
             if (Main.DebugMode) DebugLogger.LogState($"BuildTargetList rebuilt in {(Time.realtimeSinceStartup - t0) * 1000f:F1}ms, {_targetCache.Count} items");
             return _targetCache;
         }
+
+        // Called when the guide reports arrival. Hides that spot from the nav list until the player
+        // walks away (ReachedClearDist), so the NEXT tracked resource is a different one and a
+        // just-broken rock doesn't keep being offered.
+        private void MarkReached(Vector3 pos)
+        {
+            _recentlyReachedPos = pos;
+            _targetDirty = true;
+        }
+
+        // True if a world position is on the spot the player just reached (and hasn't left yet).
+        private bool IsRecentlyReached(Vector3 pos)
+            => _recentlyReachedPos.HasValue && Vector3.Distance(pos, _recentlyReachedPos.Value) < ReachedSkipRadius;
 
         // FindObjectsByType(None) skips the InstanceID sort FindObjectsOfType does - much cheaper for
         // the one-off scans below (order doesn't matter here; the list is sorted by distance later).
@@ -3036,6 +3063,7 @@ namespace TravellersRestAccess
             foreach (var harv in (_cachedHarvestables ?? FindAll<Harvestable>()))
             {
                 if (harv == null || Vector3.Distance(playerPos, harv.transform.position) > NearbyDoorRadius) continue;
+                if (IsRecentlyReached(harv.transform.position)) continue;
                 // Planted crops (trigo, chá...) are Harvestables under a CropSetter - they belong in
                 // "Cultivo" as "Planta"/crop name, NOT in "Materiais" (user: "não quero plantas que eu
                 // plantei em materiais"). Skip them here.
@@ -3052,6 +3080,7 @@ namespace TravellersRestAccess
             foreach (var misc in (_cachedMiscHarvests ?? FindAll<MiscellaneousHarvest>()))
             {
                 if (misc == null || Vector3.Distance(playerPos, misc.transform.position) > NearbyDoorRadius) continue;
+                if (IsRecentlyReached(misc.transform.position)) continue;
                 string miscName = null;
                 if (misc.harvestedItems.item != null)
                     miscName = ItemDisplayName(misc.harvestedItems.item);
@@ -3066,6 +3095,7 @@ namespace TravellersRestAccess
             foreach (var tree in (_cachedTrees ?? FindAll<Tree>()))
             {
                 if (tree == null || Vector3.Distance(playerPos, tree.transform.position) > NearbyDoorRadius) continue;
+                if (IsRecentlyReached(tree.transform.position)) continue;
                 // Skip a tree already felled (user: "peguei uma árvore e ele ainda aponta pra ela").
                 bool chopped = false; try { chopped = tree.HasBeenChopped(); } catch { }
                 if (chopped) continue;
@@ -3080,11 +3110,26 @@ namespace TravellersRestAccess
             foreach (var rock in _cachedRocks)
             {
                 if (rock == null || Vector3.Distance(playerPos, rock.transform.position) > NearbyDoorRadius) continue;
+                if (IsRecentlyReached(rock.transform.position)) continue;   // just mined it - don't re-offer
                 // Name a rock by what it drops (coal/stone/ore) so "Carvão" shows for the coal step.
                 string nm = DroppedName(rock.droppedItems != null && rock.droppedItems.Length > 0 ? rock.droppedItems[0].item : null)
                     ?? CleanSceneObjectName(rock.gameObject.name);
                 if (string.IsNullOrEmpty(nm)) nm = "Pedra";
+                // User's request: know the pickaxe LEVEL a rock needs before walking to it, so you
+                // don't reach one your tool can't break. Rock.toolLevelRequired is the tier.
+                int lvl = 1;
+                try { lvl = rock.toolLevelRequired; } catch { }
+                if (lvl > 1) nm += $", nível {lvl}";
                 list.Add((nm, GetApproachPosition(rock.gameObject, playerPos), "Materiais"));
+            }
+
+            // "Animais" (user: "animais não têm sua categoria, devem ter"): chickens/cows/etc.
+            foreach (var animal in _cachedAnimals)
+            {
+                if (animal == null || Vector3.Distance(playerPos, animal.transform.position) > NearbyDoorRadius) continue;
+                string an = CleanSceneObjectName(animal.gameObject.name);
+                if (string.IsNullOrEmpty(an)) an = "Animal";
+                list.Add((an, GetApproachPosition(animal.gameObject, playerPos), "Animais"));
             }
 
             // "Cultivo": tilled/planted tiles the player wants to find (plant/water/harvest). Each

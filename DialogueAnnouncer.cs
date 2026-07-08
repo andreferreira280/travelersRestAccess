@@ -89,6 +89,12 @@ namespace TravellersRestAccess
         // instead, by the tip panel itself appearing/disappearing.
         private bool _loadingBarSeen;
         private HashSet<string> _activeActionPrompts = new HashSet<string>();
+        // Cooldown per prompt text: some game prompts (notably a dropped item's "[Q] Pegar" near the
+        // player) FLICKER on/off every few frames, so the appear-once dedup above re-fired them
+        // constantly (user: "fica falando tecla Q para pegar"). Suppress a repeat of the same prompt
+        // within this window even if it flickers out and back.
+        private readonly Dictionary<string, float> _actionPromptCooldown = new Dictionary<string, float>();
+        private const float ActionPromptCooldown = 8f;
 
         // True only while the PLAYER is in a dialogue (Continue Button or Response Menu
         // showing) - NOT for ambient NPC-to-NPC conversations around town. Read by
@@ -272,8 +278,11 @@ namespace TravellersRestAccess
                     // some objects (e.g. a fireplace) show TWO prompts at once ("Abrir" +
                     // "Combustível") - a single-value tracker ping-ponged between the two
                     // every frame and announced both forever, instead of once each.
-                    if (!_activeActionPrompts.Contains(clean))
+                    bool onCooldown = _actionPromptCooldown.TryGetValue(clean, out var lastT)
+                        && Time.unscaledTime - lastT < ActionPromptCooldown;
+                    if (!_activeActionPrompts.Contains(clean) && !onCooldown)
                     {
+                        _actionPromptCooldown[clean] = Time.unscaledTime;
                         string stripped = ActionPromptPattern.Replace(clean, "").Trim();
                         // [143] Farming verbs (Plantar/Cavar/Arar/Regar/Colher/Remover) are now handled
                         // entirely by the direction-aware front-tile system (WorldNavigationHandler:
