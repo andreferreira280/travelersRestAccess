@@ -1010,6 +1010,10 @@ namespace TravellersRestAccess
             // hanging off the row's own button (Music/SFX rows) - check both directions.
             var result = new List<NavItem>();
             var seenVolumeSliders = new HashSet<VolumeSliderUI>();
+            // One nav entry per notice-board order: each OrderQuestElementUI has several child
+            // Selectables (button + item slot), which all read as the same "Pedido..." - the repeat
+            // the user heard. Keep only the first.
+            var seenOrders = new HashSet<OrderQuestElementUI>();
 
             foreach (var (selectable, _) in visible)
             {
@@ -1254,6 +1258,13 @@ namespace TravellersRestAccess
                 if (recipeSlot != null) continue;
                 if (recipeElement != null && recipeListEntry == null
                     && selectable.GetComponentInParent<GameCraftingUI>() != null) continue;
+
+                // Collapse an order's multiple child Selectables into a single nav entry (no repeats).
+                if (orderElement != null)
+                {
+                    if (seenOrders.Contains(orderElement)) continue;
+                    seenOrders.Add(orderElement);
+                }
 
                 result.Add(new NavItem
                 {
@@ -1681,6 +1692,10 @@ namespace TravellersRestAccess
         // (AINAHCLIAFF.INKJOLLEBGI()), not the slot's itemInstance; amount is requiredAmount; reward
         // is reward.reputationPoints. currentQuestElement distinguishes an accepted order from an
         // available one.
+        // modifierText (the "how to prepare it" description) is a protected field on QuestSlotUI.
+        private static readonly System.Reflection.FieldInfo _orderModifierText =
+            HarmonyLib.AccessTools.Field(typeof(QuestSlotUI), "modifierText");
+
         private static string DescribeOrderElement(OrderQuestElementUI element)
         {
             try
@@ -1701,11 +1716,31 @@ namespace TravellersRestAccess
 
                 int amount = 1;
                 try { amount = quest.requiredAmount; } catch { }
-                int rep = 0;
-                try { rep = quest.reward.reputationPoints; } catch { }
 
                 string s = $"{kind}: {amount} de {itemName}";
-                if (rep != 0) s += $", recompensa {rep} de reputação";
+
+                // The extra description the user reported missing (modifiers / how it must be made).
+                try
+                {
+                    var tmp = _orderModifierText?.GetValue(element) as TMPro.TMP_Text;
+                    string desc = tmp != null ? (UITextExtractor.GetReadableText(tmp) ?? tmp.text) : null;
+                    desc = desc?.Trim();
+                    if (!string.IsNullOrEmpty(desc)) s += $". {desc}";
+                }
+                catch { }
+
+                // Reward: reputation + any item rewards.
+                try
+                {
+                    int rep = quest.reward.reputationPoints;
+                    if (rep != 0) s += $". Recompensa {rep} de reputação";
+                    var itemsReward = quest.reward.itemsReward;
+                    if (itemsReward != null)
+                        foreach (var ir in itemsReward)
+                            if (ir.item != null) s += $", {ir.amount} de {ir.item.IABAKHPEOAF()}";
+                }
+                catch { }
+
                 return s;
             }
             catch { return "Pedido"; }
