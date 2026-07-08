@@ -4142,24 +4142,21 @@ namespace TravellersRestAccess
             return result;
         }
 
-        // A tile is a usable approach if the game says it's a real walkable ground tile AND nothing
-        // solid (a non-trigger collider that isn't the target itself) sits on it - the same two
-        // things the A* search requires (avoidWalls + avoidObjects), so a point passing this is one
-        // the pathfinder can actually stand on.
-        private static readonly Collider2D[] _approachOverlap = new Collider2D[8];
+        // A tile is a usable approach iff it's a node the pathfinder can actually stand on. This is
+        // the EXACT test the game A* uses (WorldGrid.DLFFCGLGDLL reads PathNode.isFree from
+        // PathNodesManager.pathNodes, keyed by the grid-snapped position; a position that isn't a key,
+        // or whose node isn't free, is treated as blocked). Round 231-232 wrongly used
+        // WorldGrid.LKBLKCFOEPA + a Physics2D overlap, which disagreed with the pathfinder (so the
+        // mine passage's non-free trigger tile "looked" walkable and the snap never moved) AND the
+        // overlap call was the lag the user reported. This match is a cheap dictionary lookup.
         private static bool IsWalkableApproach(Vector3 pos, Collider2D target)
         {
-            bool ground = false;
-            try { ground = WorldGrid.LKBLKCFOEPA(pos); } catch { }
-            if (!ground) return false;
-            int n = Physics2D.OverlapPointNonAlloc(pos, _approachOverlap);
-            for (int i = 0; i < n; i++)
+            try
             {
-                var c = _approachOverlap[i];
-                if (c == null || c.isTrigger || c == target) continue;
-                return false; // a solid object occupies this tile
+                Vector2 key = Utils.MJEACANINDN(pos);
+                return PathNodesManager.pathNodes.TryGetValue(key, out var node) && node.isFree;
             }
-            return true;
+            catch { return false; }
         }
 
         // Snap an arbitrary point (e.g. a TravelZone passage square, whose trigger centre often sits
