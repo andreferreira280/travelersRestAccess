@@ -3074,7 +3074,10 @@ namespace TravellersRestAccess
                 if (string.IsNullOrEmpty(nm)) nm = "Árvore";
                 list.Add(($"Árvore, {nm}", GetApproachPosition(tree.gameObject, playerPos), "Materiais"));
             }
-            foreach (var rock in FindAll<Rock>())
+            // Round 235: reuse the shared cache (refreshed on area change / mining action / 60s)
+            // instead of a fresh full-scene scan on every Page Up/Down - the nav-list rebuild was
+            // doing several of these ~42ms scans per keypress.
+            foreach (var rock in _cachedRocks)
             {
                 if (rock == null || Vector3.Distance(playerPos, rock.transform.position) > NearbyDoorRadius) continue;
                 // Name a rock by what it drops (coal/stone/ore) so "Carvão" shows for the coal step.
@@ -3095,7 +3098,7 @@ namespace TravellersRestAccess
             // dropped). FertileSoil only exists where they tilled, so listing all is fine. State is
             // spelled out so a screen-reader player knows what to do: dry soil needs watering before
             // planting; watered soil is ready to plant.
-            foreach (var fs in FindAll<FertileSoil>())
+            foreach (var fs in _cachedFertileSoils)   // round 235: cache reuse (see rock loop above)
             {
                 if (fs == null) continue;
                 string fsName;
@@ -3170,8 +3173,8 @@ namespace TravellersRestAccess
             // Round 102: only list benches that still need action (NOT yet associated to a table).
             // Once a bench is associated (Seat.table != null), the user asked to drop it from the
             // pending list - it's done, no longer something to navigate to.
-            var nearbySeats = FindAll<Seat>()
-                .Where(s => s.table == null && !(s.placeable != null && s.placeable.gameObject == heldObjectForList) && Vector3.Distance(playerPos, s.transform.position) <= NearbyDoorRadius)
+            var nearbySeats = _cachedSeats   // round 235: cache reuse (see rock loop above)
+                .Where(s => s != null && s.table == null && !(s.placeable != null && s.placeable.gameObject == heldObjectForList) && Vector3.Distance(playerPos, s.transform.position) <= NearbyDoorRadius)
                 .OrderBy(s => s.transform.position.x).ThenBy(s => s.transform.position.y)
                 .ToList();
             for (int i = 0; i < nearbySeats.Count; i++)
