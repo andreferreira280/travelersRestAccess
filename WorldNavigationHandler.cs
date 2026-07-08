@@ -1551,10 +1551,27 @@ namespace TravellersRestAccess
         // through to an empty foreach that never ran. GetDoorWalkablePosition (used
         // elsewhere for routing to a door) already has the right fallback for this exact
         // case - falls back to the door's own transform position - copied that here too.
+        // Round 234 LAG FIX: this method ran a full-scene FindAll<Door>() (~50ms in the big scenes)
+        // on EVERY call, and the directional wall/door detector (IsClosedDoorBlocking) calls it
+        // multiple times per frame while walking - a huge continuous stutter. Doors aren't
+        // created/destroyed mid-area, so the LIST is safe to cache (each door's live open/closed
+        // state is still read fresh per iteration below).
+        private static Door[] _doorListCache;
+        private static float _doorListCacheTime = -999f;
+        private static Door[] DoorsCached()
+        {
+            if (_doorListCache == null || Time.unscaledTime - _doorListCacheTime > 15f)
+            {
+                _doorListCacheTime = Time.unscaledTime;
+                _doorListCache = FindAll<Door>();
+            }
+            return _doorListCache;
+        }
+
         private static float? GetClosedDoorBlockDistance(Vector2 pos, Vector2 direction, float maxDistance, bool logDiag = false)
         {
             float? best = null;
-            foreach (var door in FindAll<Door>())
+            foreach (var door in DoorsCached())
             {
                 // Door.open itself is protected - ECMGCJGPKNO (decompiled name) is the
                 // public property whose getter returns it.
@@ -4744,7 +4761,16 @@ namespace TravellersRestAccess
         // cause of "anuncios de item proximo demora muito"). Now both read this cache.
         private Placeable[] _cachedAllPlaceables = new Placeable[0];
         private float _lastAllPlaceablesTime = -999f;
-        private const float AllPlaceablesInterval = 15f;
+        // Round 234: was 15s. The cached objects (rocks, trees, harvestables, placeables...) are
+        // STATIC - they only change when one is created/destroyed (mined, chopped, planted, placed)
+        // or when the player changes area. Both are already handled by events: OnActionDone forces a
+        // re-scan (EnsureFarmHooks), and _lastScanLocation below forces one on area change. So the
+        // blind periodic re-scan is almost pure wasted cost (each stage is a ~42ms full-scene
+        // FindObjectsByType - the lag the user feels). Widened to 60s as a rare safety net only.
+        private const float AllPlaceablesInterval = 60f;
+        // Force a fresh scan the moment the player enters a new area (its objects are different), so
+        // the long interval above never leaves stale/empty resource data after a transition.
+        private Location _lastScanLocation = Location.None;
 
         // Ambient proximity announcement [82] (user chose option "a": announce each new
         // resource/tree/animal as you pass). Cached scans + a "already announced" set with
@@ -4778,6 +4804,12 @@ namespace TravellersRestAccess
             // are never null (init to empty), so consumers reading a not-yet-refreshed stage just see
             // last cycle's data (or empty on cold start) - safe, no NRE. Rats use the game's own live
             // list (SceneReferences.tutorialRats), so they're not scanned here.
+            // Area change: force a fresh scan cycle now (new area = different objects).
+            if (_sceneScanStage < 0)
+            {
+                var loc = PlayerController.GetPlayer(1)?.LEOIMFNKFGA ?? Location.None;
+                if (loc != _lastScanLocation) { _lastScanLocation = loc; _lastAllPlaceablesTime = -999f; }
+            }
             if (_sceneScanStage < 0 && Time.unscaledTime - _lastAllPlaceablesTime >= AllPlaceablesInterval)
             {
                 _lastAllPlaceablesTime = Time.unscaledTime;
