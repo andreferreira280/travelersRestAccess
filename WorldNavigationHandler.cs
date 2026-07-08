@@ -460,27 +460,56 @@ namespace TravellersRestAccess
         private static System.Reflection.FieldInfo _completedObjField;
         private string ObjectiveSummary()
         {
+            var texts = new List<string>();
+
+            // Tutorial objectives (NewTutorialManager) - the early-game "faça X" steps.
             var tm = NewTutorialManager.instance;
-            if (tm == null || tm.objectives == null) return null;
-            List<bool> completed = null;
+            if (tm != null && tm.objectives != null)
+            {
+                List<bool> completed = null;
+                try
+                {
+                    if (_completedObjField == null)
+                        _completedObjField = typeof(NewTutorialManager).GetField("completedObjectives",
+                            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    completed = _completedObjField?.GetValue(tm) as List<bool>;
+                }
+                catch { }
+                for (int i = 0; i < tm.objectives.Length; i++)
+                {
+                    var obj = tm.objectives[i];
+                    if (obj == null || obj.gameObject == null || !obj.gameObject.activeInHierarchy || obj.textMesh == null) continue;
+                    string t = UITextExtractor.GetReadableText(obj.textMesh);
+                    if (string.IsNullOrEmpty(t)) continue;
+                    bool done = completed != null && i < completed.Count && completed[i];
+                    string entry = done ? $"{t.Trim()} (feito)" : t.Trim();
+                    if (!texts.Contains(entry)) texts.Add(entry);
+                }
+            }
+
+            // Round 238: also read the MISSION/quest objective panel (MissionsManager.objectivesPanel)
+            // - the on-screen tracker for a selected notice-board mission. The Tab readout used to
+            // only see tutorial objectives, so once the tutorial was done it said "nenhum objetivo"
+            // even with a mission showing on screen (user report). Reading the live panel text matches
+            // exactly what's displayed, including which mission is currently focused.
             try
             {
-                if (_completedObjField == null)
-                    _completedObjField = typeof(NewTutorialManager).GetField("completedObjectives",
-                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                completed = _completedObjField?.GetValue(tm) as List<bool>;
+                var mm = MissionsManager.instance;
+                if (mm != null && mm.objectivesPanel != null && mm.objectivesPanel.activeInHierarchy)
+                {
+                    foreach (var tmp in mm.objectivesPanel.GetComponentsInChildren<TMPro.TMP_Text>(false))
+                    {
+                        if (tmp == null) continue;
+                        string s = UITextExtractor.GetReadableText(tmp);
+                        if (string.IsNullOrEmpty(s)) s = tmp.text;
+                        s = s?.Trim();
+                        if (string.IsNullOrEmpty(s) || s.Length < 2) continue;
+                        if (!texts.Contains(s)) texts.Add(s);
+                    }
+                }
             }
             catch { }
-            var texts = new List<string>();
-            for (int i = 0; i < tm.objectives.Length; i++)
-            {
-                var obj = tm.objectives[i];
-                if (obj == null || obj.gameObject == null || !obj.gameObject.activeInHierarchy || obj.textMesh == null) continue;
-                string t = UITextExtractor.GetReadableText(obj.textMesh);
-                if (string.IsNullOrEmpty(t)) continue;
-                bool done = completed != null && i < completed.Count && completed[i];
-                texts.Add(done ? $"{t.Trim()} (feito)" : t.Trim());
-            }
+
             return texts.Count == 0 ? null : string.Join(". ", texts);
         }
 
