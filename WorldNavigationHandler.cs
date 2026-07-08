@@ -3075,7 +3075,11 @@ namespace TravellersRestAccess
             // aparecer na categoria pendente").
             foreach (var bath in FindAll<HotBathEvent>())
             {
-                if (bath == null) continue;
+                // User: "banho quente fica aparecendo fora da pedreira e com a missão concluída".
+                // Only list it while the event is actually live (GameEvent.isActive && !isDone) AND
+                // the player is near it - it had no distance or state filter, so it showed always.
+                if (bath == null || !bath.isActive || bath.isDone) continue;
+                if (Vector3.Distance(playerPos, bath.transform.position) > NearbyDoorRadius) continue;
                 list.Add(("Banho quente", GetApproachPosition(bath.gameObject, playerPos), "Pendentes"));
             }
             // Mailbox (user: "caixa de correio não está em maquinas"). PostBox is IInteractable, not a
