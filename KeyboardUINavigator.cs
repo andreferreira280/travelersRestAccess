@@ -1208,6 +1208,7 @@ namespace TravellersRestAccess
                     labelReader = () => DescribeOrderElement(orderElement);
                 }
 
+
                 var ownInputField = selectable.GetComponent<TMP_InputField>();
                 if (ownInputField != null)
                 {
@@ -1946,27 +1947,26 @@ namespace TravellersRestAccess
             {
                 var parts = new System.Collections.Generic.List<string>();
                 var pp = slot.playerPerk;
-                // Perk.description is the dev's SPANISH string (user: "está tudo em espanhol"). The
-                // LOCALIZED (Portuguese) effect text is what TalentSlotUI's own tooltip builds
-                // (TalentSlotUI.cs:185): AMICIBODAEJ() for single-value perks, IABAKHPEOAF(false,
-                // level) for multi-level ones. Mirror that; fall back to description only on error.
-                string desc = null;
+                // The perk NAME is PlayerPerk.IABAKHPEOAF() (clean: LocalisationSystem.Get(
+                // "Perks/playerPerk_name_"+id), localized to PT, + Roman level markers for multi-level
+                // perks). The old code instead used AMICIBODAEJ()/description as the label - but
+                // AMICIBODAEJ (and every other perk string getter except IABAKHPEOAF) is an obfuscator
+                // DECOY full of garbage constants, so it returned junk/base.name. That's why "não lê
+                // direito nem os nomes". NFEMMGMJMCF:false drops the <sprite>/<color> preview tags.
+                string name = null;
                 if (pp != null)
                 {
-                    try
-                    {
-                        desc = (pp.values == null || pp.values.Length <= 1)
-                            ? pp.AMICIBODAEJ()
-                            : pp.IABAKHPEOAF(false, PerksDatabaseAccessor.GetPlayerPerkLevel(pp.id) + 1);
-                    }
-                    catch { desc = pp.description; }
+                    try { name = pp.IABAKHPEOAF(false); } catch { }
                 }
-                parts.Add(string.IsNullOrWhiteSpace(desc) ? "Habilidade" : desc);
+                if (string.IsNullOrWhiteSpace(name)) name = "Habilidade";
+                name = System.Text.RegularExpressions.Regex.Replace(name, "<[^>]+>", "").Trim();
+                parts.Add(name);
+
                 if (slot.levelText != null && !string.IsNullOrWhiteSpace(slot.levelText.text))
-                    parts.Add($"nível {slot.levelText.text}");
+                    parts.Add($"nível {slot.levelText.text.Trim()}");
                 bool locked = slot.lockedIcon != null && slot.lockedIcon.gameObject.activeInHierarchy;
-                parts.Add(locked ? "bloqueada" : "disponível");
-                if (Main.DebugMode) DebugLogger.LogState($"DescribeTalentSlot: desc=\"{desc}\" level=\"{slot.levelText?.text}\" locked={locked}");
+                parts.Add(locked ? "bloqueada" : "desbloqueada");
+                if (Main.DebugMode) DebugLogger.LogState($"DescribeTalentSlot: name=\"{name}\" level=\"{slot.levelText?.text}\" locked={locked}");
                 return string.Join(", ", parts);
             }
             catch { return "Habilidade"; }
