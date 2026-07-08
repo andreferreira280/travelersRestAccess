@@ -1770,7 +1770,41 @@ namespace TravellersRestAccess
             // (e.g. 10 candles). Slot.Stack (decompiled) is the live count; only announce
             // it when it's a real stack (>1) to avoid noise on single items.
             int stack = slot.Stack;
-            return stack > 1 ? $"{name}, {stack}" : name;
+            string result = stack > 1 ? $"{name}, {stack}" : name;
+
+            // Aging barrel: append the aging level (and progress) for the drink in this slot
+            // (user: "cervejas envelhecidas têm níveis... não é informado").
+            string aging = AgingBarrelSlotInfo(slotUI, slot);
+            if (!string.IsNullOrEmpty(aging)) result += aging;
+            return result;
+        }
+
+        // For a slot inside an AgingBarrelUI, returns ", nível de envelhecimento N" (+ progress %),
+        // matching the SlotUI to its barrel index via the barrel's own inputSlot array.
+        private static string AgingBarrelSlotInfo(SlotUI slotUI, Slot slot)
+        {
+            try
+            {
+                var ui = slotUI.GetComponentInParent<AgingBarrelUI>();
+                if (ui == null || ui.agingBarrel == null) return null;
+                var barrel = ui.agingBarrel;
+                if (barrel.inputSlot == null) return null;
+                int idx = -1;
+                for (int i = 0; i < barrel.inputSlot.Length; i++)
+                    if (barrel.inputSlot[i] == slot) { idx = i; break; }
+                if (idx < 0) return null;
+
+                string extra = "";
+                if (barrel.agingLevel != null && idx < barrel.agingLevel.Length)
+                    extra += $", nível de envelhecimento {barrel.agingLevel[idx]}";
+                if (barrel.timer != null && idx < barrel.timer.Length && barrel.timer[idx] != null)
+                {
+                    float p = barrel.timer[idx].ONLGPFBKFIE();
+                    if (p >= 0f && p <= 1f) extra += $", {Mathf.RoundToInt(p * 100f)} por cento envelhecido";
+                }
+                return extra;
+            }
+            catch { return null; }
         }
 
         // Round 112: a recipe entry (RecipeSlot) in the oven list - announce the dish name, whether
