@@ -198,8 +198,19 @@ namespace TravellersRestAccess
                 && (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)))
             {
                 var sb = _shopBase; _shopBase = null;
-                try { sb.OrderBasket(); ScreenReader.Say("Compra confirmada", interrupt: true); DebugLogger.LogInput("Ctrl+Enter", "Shop OrderBasket"); }
+                // User: a butcher purchase silently did nothing because the inventory was full - no
+                // warning. Detect failure by whether money actually changed (OrderBasket deducts on
+                // success), and say WHY instead of a false "Compra confirmada".
+                int moneyBefore = -1;
+                try { if (Money.IsValid()) moneyBefore = Money.ToCopper(); } catch { }
+                try { sb.OrderBasket(); DebugLogger.LogInput("Ctrl+Enter", "Shop OrderBasket"); }
                 catch (System.Exception ex) { if (Main.DebugMode) DebugLogger.LogState($"OrderBasket threw: {ex.Message}"); }
+                int moneyAfter = -1;
+                try { if (Money.IsValid()) moneyAfter = Money.ToCopper(); } catch { }
+                if (moneyBefore >= 0 && moneyAfter == moneyBefore)
+                    ScreenReader.Say("Compra não realizada. Inventário cheio ou dinheiro insuficiente.", interrupt: true);
+                else
+                    ScreenReader.Say("Compra confirmada", interrupt: true);
                 return;
             }
 
