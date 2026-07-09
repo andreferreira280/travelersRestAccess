@@ -1391,6 +1391,7 @@ namespace TravellersRestAccess
             // items reading the ON-SCREEN PT text (user: "coloque 4 elementos... ler com as setas").
             InjectPostboxLetterFields(result);
             InjectYesNoDialogueText(result);
+            InjectOrderRepLock(result, topWindow);
 
             // User [74][76][77]: in EVERY list, the Back ("Voltar") button must be the last
             // item; and in menus with Accept/Cancel (cooking, malt, modifiers) "Aceitar" must
@@ -1528,6 +1529,32 @@ namespace TravellersRestAccess
                     result.Insert(0, new NavItem { SlotObject = go, LabelReader = () => lbl });
                 }
                 if (Main.DebugMode) DebugLogger.LogState($"InjectPostboxLetterFields: added {items.Count} letter fields (sender=\"{_lastLetterSender}\")");
+            }
+            catch { }
+        }
+
+        // The orders section is locked behind tavern reputation until a certain level; when locked,
+        // OrderQuestUI.repLock is active and shows "Desbloqueável com reputação da taverna nível N",
+        // but there are no order elements to navigate so the player heard nothing (user report).
+        // Inject that on-screen text as a navigable item.
+        private static void InjectOrderRepLock(List<NavItem> result, UIWindow topWindow)
+        {
+            try
+            {
+                if (!(topWindow is OrderQuestUI oqu)) return;
+                if (oqu.repLock == null || !oqu.repLock.activeInHierarchy) return;
+                string txt = null;
+                foreach (var tmp in oqu.repLock.GetComponentsInChildren<TMPro.TMP_Text>(false))
+                {
+                    if (tmp == null) continue;
+                    string s = UITextExtractor.GetReadableText(tmp);
+                    if (string.IsNullOrEmpty(s)) s = tmp.text;
+                    s = StripRichTags(s);
+                    if (!string.IsNullOrWhiteSpace(s) && s.Length >= 2) { txt = s; break; }
+                }
+                if (string.IsNullOrWhiteSpace(txt)) txt = "Pedidos bloqueados por reputação da taverna";
+                string label = txt;
+                result.Insert(0, new NavItem { SlotObject = oqu.repLock, LabelReader = () => label });
             }
             catch { }
         }
