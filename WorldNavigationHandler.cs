@@ -89,6 +89,20 @@ namespace TravellersRestAccess
         // the next area over. Fixes "tem alguns da cidade q aparecem fora... rotas completamente
         // loucas".
         private const float MerchantRadius = 300f;
+        // In the city the user wants EVERY door/passage listed from anywhere in the city, not just
+        // the nearby ones ("quando eu entrar na cidade, quero todas as passagens e portas sempre
+        // disponiveis em qualquer parte da cidade"). Intra-area spread is < 300 and the next area
+        // over is 500-1000+ units away, so a 600-unit radius covers the whole city and its inner
+        // buildings' entrances (Ferraria/Serraria) without pulling in other maps.
+        private const float CityWideDoorRadius = 600f;
+
+        // The city and every sub-area reached from it (their entrance passages should all be listed).
+        private static bool IsCityLocation(Location loc)
+        {
+            return loc == Location.City || loc == Location.CityOutside || loc == Location.CityTavern
+                || loc == Location.Sawmill || loc == Location.Blacksmith || loc == Location.PetShop
+                || loc == Location.Bathhouse || loc == Location.BathhouseInterior;
+        }
 
         private Location? _lastLocation;
         private static readonly Dictionary<Location, string> LocationNames = new Dictionary<Location, string>
@@ -2950,10 +2964,12 @@ namespace TravellersRestAccess
             // User's explicit request: doors should show up just by being in the same
             // area, without needing to have been opened first (that requirement only
             // exists for telling THIS one apart as "the entrance" specifically).
+            // In the city, list every door/passage across the whole city (not just nearby ones).
+            float doorRadius = IsCityLocation(playerLocation) ? CityWideDoorRadius : NearbyDoorRadius;
             foreach (var door in (_cachedDoors ?? FindAll<Door>()))
             {
                 if (door == null || door == _rememberedEntranceDoor) continue;
-                if (Vector3.Distance(playerPos, door.transform.position) > NearbyDoorRadius) continue;
+                if (Vector3.Distance(playerPos, door.transform.position) > doorRadius) continue;
                 list.Add((DescribeDoor(door), GetDoorWalkablePosition(door, playerPos), "Portas"));
             }
 
@@ -2965,7 +2981,7 @@ namespace TravellersRestAccess
             foreach (var zone in FindAll<TravelZone>())
             {
                 if (zone == null) continue;
-                if (Vector3.Distance(playerPos, zone.transform.position) > NearbyDoorRadius) continue;
+                if (Vector3.Distance(playerPos, zone.transform.position) > doorRadius) continue;
                 // Route to a WALKABLE approach point, not the zone's raw center. Confirmed in
                 // the city log: "Passagem para a taverna da cidade" got "sem rota ainda" every
                 // frame (A* never reached the goal) and the straight-line fallback walked the
