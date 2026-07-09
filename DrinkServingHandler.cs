@@ -177,7 +177,12 @@ namespace TravellersRestAccess
                 var item = inst.LHBPOPOIFLE();
                 var tray = GetTray();
                 if (item == null || tray == null) return false;
-                return tray.FEEOFAGCONJ(item.KDNBBPJCNDJ(inst), null);
+                if (!tray.FEEOFAGCONJ(item.KDNBBPJCNDJ(inst), null)) return false;
+                // Consume one unit from the barrel, exactly like the game's own TakeDrink does
+                // (isDirty + MEODNPFJDMH), so the recipient empties as it's served instead of freezing.
+                slot.isDirty = true;
+                slot.MEODNPFJDMH();
+                return true;
             }
             catch (System.Exception e) { if (Main.DebugMode) DebugLogger.LogState($"DrinkServing: PourFromSlot error {e.Message}"); return false; }
         }
