@@ -3360,6 +3360,26 @@ namespace TravellersRestAccess
                 string label = g.count > 1 ? $"{nm} ({g.count} perto)" : nm;
                 grouped.Add((label, g.pos, cat));
             }
+
+            // User: unique objects (aging barrels, chests, forms - anything NOT collapsed as a
+            // resource) can share the same name; give each a stable ID so it's individually
+            // trackable ("Barril de envelhecimento 1, 2, 3..."). Number by position so the same
+            // physical object keeps the same number across rebuilds.
+            var nameCounts = new Dictionary<string, int>();
+            foreach (var e in grouped) { nameCounts.TryGetValue(e.name, out int c); nameCounts[e.name] = c + 1; }
+            for (int i = 0; i < grouped.Count; i++)
+            {
+                var e = grouped[i];
+                if (nameCounts.TryGetValue(e.name, out int cnt) && cnt > 1)
+                {
+                    int idx = 1;
+                    foreach (var other in grouped)
+                        if (other.name == e.name && (other.position.x < e.position.x
+                            || (other.position.x == e.position.x && other.position.y < e.position.y)))
+                            idx++;
+                    grouped[i] = ($"{e.name} {idx}", e.position, e.category);
+                }
+            }
             return grouped;
         }
 

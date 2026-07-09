@@ -1392,6 +1392,7 @@ namespace TravellersRestAccess
             InjectPostboxLetterFields(result);
             InjectYesNoDialogueText(result);
             InjectOrderRepLock(result, topWindow);
+            InjectRepRewardText(result, topWindow);
 
             // User [74][76][77]: in EVERY list, the Back ("Voltar") button must be the last
             // item; and in menus with Accept/Cancel (cooking, malt, modifiers) "Aceitar" must
@@ -1529,6 +1530,36 @@ namespace TravellersRestAccess
                     result.Insert(0, new NavItem { SlotObject = go, LabelReader = () => lbl });
                 }
                 if (Main.DebugMode) DebugLogger.LogState($"InjectPostboxLetterFields: added {items.Count} letter fields (sender=\"{_lastLetterSender}\")");
+            }
+            catch { }
+        }
+
+        // Reputation MILESTONE reward popup (RepRewardPopUp): shows "Novo marco / Recompensa de
+        // reputação nível N / Recompensas / ... / Pontos de habilidade / Fragmentos de receita" but
+        // only the "Aceitar" button was navigable (user: the message isn't read, only Aceitar). Inject
+        // the on-screen text lines as navigable items so the whole reward reads with the arrows.
+        private static void InjectRepRewardText(List<NavItem> result, UIWindow topWindow)
+        {
+            try
+            {
+                if (!(topWindow is RepRewardPopUp pop)) return;
+                var parts = new List<string>();
+                foreach (var tmp in pop.GetComponentsInChildren<TMPro.TMP_Text>(false))
+                {
+                    if (tmp == null) continue;
+                    string s = UITextExtractor.GetReadableText(tmp);
+                    if (string.IsNullOrEmpty(s)) s = tmp.text;
+                    s = StripRichTags(s);
+                    if (string.IsNullOrWhiteSpace(s) || s.Length < 2) continue;
+                    if (s.Trim().Equals("Aceitar", System.StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!parts.Contains(s)) parts.Add(s);
+                }
+                for (int i = parts.Count - 1; i >= 0; i--)
+                {
+                    string lbl = parts[i];
+                    result.Insert(0, new NavItem { SlotObject = pop.gameObject, LabelReader = () => lbl });
+                }
+                if (Main.DebugMode) DebugLogger.LogState($"InjectRepRewardText: added {parts.Count} lines");
             }
             catch { }
         }
