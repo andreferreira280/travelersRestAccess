@@ -58,7 +58,10 @@ namespace TravellersRestAccess
                     return;
                 }
             }
-            if (Input.GetKeyDown(KeyCode.X)) ServeLast();
+            // X is left to the game (native tavern serving) per the user. F5 serves the tray drink
+            // to the FIRST customer in the announced queue (the OLDEST order) - used in the
+            // competition (1-slot tray). F3 reads the queue (oldest first).
+            if (Input.GetKeyDown(KeyCode.F5)) ServeFirstInQueue();
             if (Input.GetKeyDown(KeyCode.F3)) AnnounceOrderQueue();
         }
 
@@ -75,8 +78,8 @@ namespace TravellersRestAccess
             var list = new List<Disp>();
 
             // During a banquet, use ONLY the banquet barrels. Otherwise (tavern) use ONLY the bar's
-            // serving taps. Before, both were merged - and BanquetDrinksManager is a persistent scene
-            // singleton, so its barrels leaked into the tavern list ("recipientes que não tenho").
+            // 3 serving TAPS (Bar.beerTaps) - NOT DrinkDispensersManager.allDrinkDispensers, which
+            // also holds cellar/aging barrels (the log showed 6). Slot 0 holds the assigned drink.
             if (BanquetActive())
             {
                 try
@@ -87,10 +90,9 @@ namespace TravellersRestAccess
                         {
                             if (b == null) continue;
                             string drink = SlotDrink(b.slots);
-                            if (Main.DebugMode) DebugLogger.LogState($"DrinkServing barrel candidate: drink={drink}");
                             if (string.IsNullOrEmpty(drink)) continue;
                             var bb = b;
-                            list.Add(new Disp { drink = drink, pour = () => { DrinkDispenser.FinishPull(1, bb.slots[0], bb.work, PFFAMHBDDMA: false); return true; } });
+                            list.Add(new Disp { drink = drink, pour = () => PourFromSlots(bb.slots) });
                             if (list.Count >= 10) return list;
                         }
                 }
@@ -100,24 +102,37 @@ namespace TravellersRestAccess
 
             try
             {
-                var ddm = DrinkDispensersManager.GGFJGHHHEJC;
-                if (ddm != null && ddm.allDrinkDispensers != null)
-                    foreach (var dd in ddm.allDrinkDispensers)
+                var bar = Bar.instance;
+                if (bar != null && bar.beerTaps != null)
+                    foreach (var tap in bar.beerTaps)
                     {
-                        if (dd == null) continue;
-                        string cand = SlotDrink(dd.slots);
-                        string pName = null;
-                        try { pName = dd.placeable != null ? dd.placeable.gameObject.name : null; } catch { }
-                        if (Main.DebugMode) DebugLogger.LogState($"DrinkServing tap candidate: isBeerTap={dd.isBeerTap} drink={cand} placeable={pName}");
-                        if (!dd.isBeerTap) continue;                 // only the bar SERVING taps, not cellar/storage barrels
-                        if (string.IsNullOrEmpty(cand)) continue;    // skip empty
-                        var d = dd;
-                        list.Add(new Disp { drink = cand, pour = () => { DrinkDispenser.FinishPull(1, d.slots[0], d.work, PFFAMHBDDMA: false, d); return true; } });
+                        if (tap == null || tap.drinkDispenser == null) continue;
+                        var dd = tap.drinkDispenser;
+                        string drink = SlotDrink(dd.slots);
+                        if (Main.DebugMode) DebugLogger.LogState($"DrinkServing tap: id={tap.id} drink={drink}");
+                        if (string.IsNullOrEmpty(drink)) continue;   // skip empty taps
+                        list.Add(new Disp { drink = drink, pour = () => PourFromSlots(dd.slots) });
                         if (list.Count >= 10) return list;
                     }
             }
             catch { }
             return list;
+        }
+
+        // Add ONE drink from a dispenser's slot 0 to the player's tray, using the game's own tray-add
+        // (Tray.FEEOFAGCONJ) - NOT DrinkDispenser.FinishPull, which threw InvalidCastException.
+        private static bool PourFromSlots(Slot[] slots)
+        {
+            try
+            {
+                var inst = slots != null && slots.Length > 0 ? slots[0].itemInstance : null;
+                if (inst == null) return false;
+                var item = inst.LHBPOPOIFLE();
+                var tray = GetTray();
+                if (item == null || tray == null) return false;
+                return tray.FEEOFAGCONJ(item.KDNBBPJCNDJ(inst), null);
+            }
+            catch (System.Exception e) { if (Main.DebugMode) DebugLogger.LogState($"DrinkServing: PourFromSlots error {e.Message}"); return false; }
         }
 
         private static string SlotDrink(Slot[] slots)
@@ -190,15 +205,14 @@ namespace TravellersRestAccess
             ScreenReader.Say(parts.Count == 0 ? "Nenhum pedido na fila" : string.Join(", ", parts), interrupt: true);
         }
 
-        private void ServeLast()
+        // F5: serve the tray drink to the FIRST (oldest) customer in the queue - the same order F3
+        // announces. ServeCustomer takes that customer's requested drink off the tray.
+        private void ServeFirstInQueue()
         {
             var tray = GetTray();
             if (tray == null || tray.currentDrinks == null || tray.currentDrinks.Count == 0) { ScreenReader.Say("Bandeja vazia", interrupt: true); return; }
-            var last = tray.currentDrinks[tray.currentDrinks.Count - 1];
-            int lastId = ReqId(last);
-            string drinkName = ReqName(last);
 
-            // Tavern customer wanting it
+            // Tavern first (oldest waiting customer)
             try
             {
                 var bar = Bar.instance;
@@ -206,16 +220,16 @@ namespace TravellersRestAccess
                     foreach (var npc in bar.waitingAtBar)
                     {
                         if (npc == null || npc.customer == null || npc.customer.currentRequest == null) continue;
-                        if (ReqId(npc.customer.currentRequest) != lastId) continue;
+                        string want = ReqName(npc.customer.currentRequest);
                         bool ok = false;
                         try { ok = npc.customer.ServeCustomer(1, NLCDDFDGACP: true, DOGOFILIHPJ: tray, NAKCFGEAGHH: null); } catch (System.Exception e) { if (Main.DebugMode) DebugLogger.LogState($"DrinkServing: tavern serve error {e.Message}"); }
-                        ScreenReader.Say(ok ? $"Servido {drinkName} ao cliente" : $"Não consegui servir {drinkName}", interrupt: true);
+                        ScreenReader.Say(ok ? $"Servido {want} ao cliente" : $"Não consegui servir {want}", interrupt: true);
                         return;
                     }
             }
             catch { }
 
-            // Banquet customer wanting it
+            // Banquet first (oldest table order)
             try
             {
                 var bom = BanquetOrdersManager.instance;
@@ -223,16 +237,16 @@ namespace TravellersRestAccess
                     foreach (var c in bom.tableOrders)
                     {
                         if (c == null || c.currentRequest == null) continue;
-                        if (ReqId(c.currentRequest) != lastId) continue;
+                        string want = ReqName(c.currentRequest);
                         bool ok = false;
                         try { ok = c.ServeCustomer(1, NLCDDFDGACP: true, DOGOFILIHPJ: tray); } catch (System.Exception e) { if (Main.DebugMode) DebugLogger.LogState($"DrinkServing: banquet serve error {e.Message}"); }
-                        ScreenReader.Say(ok ? $"Servido {drinkName} ao cliente" : $"Não consegui servir {drinkName}", interrupt: true);
+                        ScreenReader.Say(ok ? $"Servido {want} ao cliente" : $"Não consegui servir {want}", interrupt: true);
                         return;
                     }
             }
             catch { }
 
-            ScreenReader.Say($"Nenhum cliente quer {drinkName} agora", interrupt: true);
+            ScreenReader.Say("Nenhum cliente na fila", interrupt: true);
         }
     }
 }
