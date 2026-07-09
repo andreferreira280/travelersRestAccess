@@ -2047,20 +2047,28 @@ namespace TravellersRestAccess
                     // (user: "tinha grãos/carne e diz que não tem"). For a group, count every slot
                     // whose ingredient TYPE matches, via the game's own type-aware lookup.
                     int owned = 0;
-                    try
+                    var grp = ing.item as IngredientGroup;
+                    if (grp != null)
                     {
-                        if (ing.item is IngredientGroup grp && grp.ingredientsTypes != null)
+                        // Group ingredient ("any grain/meat/..."). Count every matching item by type.
+                        try
                         {
-                            var types = new System.Collections.Generic.List<IngredientType>(grp.ingredientsTypes);
-                            var slots = CraftingInventory.GetSlotsOfSpecificIngredientTypes(1, types, null, recipe.ingredientsNeeded);
-                            if (slots != null) foreach (var sl in slots) if (sl != null) owned += sl.Stack;
+                            var types = grp.ingredientsTypes != null
+                                ? new System.Collections.Generic.List<IngredientType>(grp.ingredientsTypes)
+                                : null;
+                            if (types != null && types.Count > 0)
+                            {
+                                var slots = CraftingInventory.GetSlotsOfSpecificIngredientTypes(1, types, null, recipe.ingredientsNeeded);
+                                if (slots != null) foreach (var sl in slots) if (sl != null && sl.itemInstance != null) owned += sl.Stack;
+                            }
+                            if (Main.DebugMode) DebugLogger.LogState($"RecipeIng GROUP \"{iName}\" typesCount={(types?.Count ?? -1)} owned={owned}");
                         }
-                        else
-                        {
-                            owned = pi != null ? pi.NumberOfItems(ing.item.JDJGFAACPFC()) : 0;
-                        }
+                        catch (System.Exception e) { if (Main.DebugMode) DebugLogger.LogState($"RecipeIng GROUP \"{iName}\" ERROR {e.Message}"); }
                     }
-                    catch { owned = pi != null ? pi.NumberOfItems(ing.item.JDJGFAACPFC()) : 0; }
+                    else
+                    {
+                        try { owned = pi != null ? pi.NumberOfItems(ing.item.JDJGFAACPFC()) : 0; } catch { }
+                    }
                     if (owned < ing.amount) canCraft = false;
                     parts.Add($"{iName} {ing.amount}, tem {owned}");
                 }
