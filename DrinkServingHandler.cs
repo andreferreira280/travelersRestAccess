@@ -106,61 +106,54 @@ namespace TravellersRestAccess
                 return list;
             }
 
-            // Diagnostic ALWAYS logged (not gated on F12/DebugMode), so I get the data even when the
-            // user forgets F12. Dumps every dispenser with isBeerTap + drink + position.
-            try
-            {
-                int bt = 0;
-                var bar0 = Bar.instance;
-                if (bar0 != null && bar0.beerTaps != null)
-                    foreach (var tap in bar0.beerTaps)
-                        if (tap != null && tap.drinkDispenser != null)
-                        { bt++; MelonLoader.MelonLogger.Msg($"DrinkServing DIAG beerTap: id={tap.id} drink={SlotDrink(tap.drinkDispenser.slots)} pos={tap.drinkDispenser.transform.position}"); }
-                MelonLoader.MelonLogger.Msg($"DrinkServing DIAG beerTaps total={bt}");
-                var ddm0 = DrinkDispensersManager.GGFJGHHHEJC;
-                if (ddm0 != null && ddm0.allDrinkDispensers != null)
-                    foreach (var dd in ddm0.allDrinkDispensers)
-                        if (dd != null)
-                        {
-                            var slotDump = new System.Text.StringBuilder();
-                            try { if (dd.slots != null) for (int i = 0; i < dd.slots.Length; i++) slotDump.Append($"[{i}]={ItemName(dd.slots[i]?.itemInstance)} "); } catch { }
-                            string last = null; try { last = ItemName(dd.lastDrink); } catch { }
-                            MelonLoader.MelonLogger.Msg($"DrinkServing DIAG allDisp: isBeerTap={dd.isBeerTap} id={dd.drinkDispenserId} lastDrink={last} slots={slotDump} pos={dd.transform.position}");
-                        }
-            }
-            catch { }
+            // TAVERN SOURCE = ServiceBarrels (the recipients behind the counter). The counter taps /
+            // tea urn in DrinkDispensersManager.allDrinkDispensers are SINGLE-slot fixtures and read
+            // EMPTY; the actual drinks live in the ServiceBarrels' DrinkDispenser, which has TWO slots
+            // (slot[0]=left barrel, slot[1]=right barrel) and is NOT registered in that manager (proven
+            // by the log: 4 taps + 1 tea urn, all 1-slot, taps empty). So enumerate ServiceBarrels and
+            // read every non-empty slot. FindObjectsByType only runs on an Alt press, not per-frame.
+            ServiceBarrel[] barrels;
+            try { barrels = Object.FindObjectsByType<ServiceBarrel>(FindObjectsSortMode.None); }
+            catch { barrels = null; }
+            if (barrels == null) return list;
 
-            // Source: Bar.beerTaps was EMPTY at runtime, so use the placed dispensers filtered by
-            // isBeerTap (the bar SERVING taps, not cellar/aging). If beerTaps ever populates, prefer it.
-            try
+            // Stable order for Alt 1..0: sort by position (x then y).
+            System.Array.Sort(barrels, (a, b) =>
             {
-                var bar = Bar.instance;
-                if (bar != null && bar.beerTaps != null && bar.beerTaps.Count > 0)
+                if (a == null || b == null) return 0;
+                var pa = a.transform.position; var pb = b.transform.position;
+                int cx = pa.x.CompareTo(pb.x);
+                return cx != 0 ? cx : pa.y.CompareTo(pb.y);
+            });
+
+            // Chained barrels can share one DrinkDispenser - dedup by dispenser so a drink isn't listed
+            // twice.
+            var seen = new HashSet<DrinkDispenser>();
+            foreach (var sb in barrels)
+            {
+                if (sb == null || sb.drinkDispenser == null) continue;
+                var dd = sb.drinkDispenser;
+                // DIAG (unconditional) so I can confirm where the drinks sit on the next test.
+                try
                 {
-                    foreach (var tap in bar.beerTaps)
-                    {
-                        if (tap == null || tap.drinkDispenser == null) continue;
-                        var dd = tap.drinkDispenser;
-                        string drink = SlotDrink(dd.slots);
-                        if (string.IsNullOrEmpty(drink)) continue;
-                        list.Add(new Disp { drink = drink, pour = () => PourFromSlots(dd.slots) });
-                        if (list.Count >= 10) return list;
-                    }
-                    return list;
+                    var sd = new System.Text.StringBuilder();
+                    if (dd.slots != null) for (int i = 0; i < dd.slots.Length; i++) sd.Append($"[{i}]={ItemName(dd.slots[i]?.itemInstance)} ");
+                    MelonLoader.MelonLogger.Msg($"DrinkServing DIAG serviceBarrel: slotsLen={dd.slots?.Length} slots={sd} lastDrink={ItemName(dd.lastDrink)} isBeerTap={dd.isBeerTap} pos={sb.transform.position}");
                 }
-                var ddm = DrinkDispensersManager.GGFJGHHHEJC;
-                if (ddm != null && ddm.allDrinkDispensers != null)
-                    foreach (var dd in ddm.allDrinkDispensers)
-                    {
-                        if (dd == null || !dd.isBeerTap) continue;
-                        string drink = SlotDrink(dd.slots);
-                        if (string.IsNullOrEmpty(drink)) continue;
-                        var d = dd;
-                        list.Add(new Disp { drink = drink, pour = () => PourFromSlots(d.slots) });
-                        if (list.Count >= 10) return list;
-                    }
+                catch { }
+                if (!seen.Add(dd)) continue;
+                if (dd.slots == null) continue;
+                for (int i = 0; i < dd.slots.Length; i++)
+                {
+                    var slot = dd.slots[i];
+                    var inst = slot != null ? slot.itemInstance : null;
+                    string drink = inst != null ? ItemName(inst) : null;
+                    if (string.IsNullOrEmpty(drink)) continue;
+                    var captured = slot;
+                    list.Add(new Disp { drink = drink, pour = () => PourFromSlot(captured) });
+                    if (list.Count >= 10) return list;
+                }
             }
-            catch { }
             return list;
         }
 
@@ -168,16 +161,23 @@ namespace TravellersRestAccess
         // (Tray.FEEOFAGCONJ) - NOT DrinkDispenser.FinishPull, which threw InvalidCastException.
         private static bool PourFromSlots(Slot[] slots)
         {
+            return PourFromSlot(slots != null && slots.Length > 0 ? slots[0] : null);
+        }
+
+        // Add ONE drink from a specific dispenser slot to the player's tray (barrels hold two drinks:
+        // slot[0]=left, slot[1]=right), using the game's own tray-add (Tray.FEEOFAGCONJ).
+        private static bool PourFromSlot(Slot slot)
+        {
             try
             {
-                var inst = slots != null && slots.Length > 0 ? slots[0].itemInstance : null;
+                var inst = slot != null ? slot.itemInstance : null;
                 if (inst == null) return false;
                 var item = inst.LHBPOPOIFLE();
                 var tray = GetTray();
                 if (item == null || tray == null) return false;
                 return tray.FEEOFAGCONJ(item.KDNBBPJCNDJ(inst), null);
             }
-            catch (System.Exception e) { if (Main.DebugMode) DebugLogger.LogState($"DrinkServing: PourFromSlots error {e.Message}"); return false; }
+            catch (System.Exception e) { if (Main.DebugMode) DebugLogger.LogState($"DrinkServing: PourFromSlot error {e.Message}"); return false; }
         }
 
         private static string ItemName(ItemInstance inst)
