@@ -24,14 +24,18 @@ namespace TravellersRestAccess
         {
             if (!SuppressArrowMovement) return true;
 
+            // Alt (and Ctrl+Alt) are reserved for the mod's drink-serving shortcuts - the character
+            // must NOT walk while Alt is held (user request).
+            bool alt = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
+
             if (JKJJKBAFNMO == "HorizontalMove")
             {
-                __result = (Input.GetKey(KeyCode.D) ? 1f : 0f) - (Input.GetKey(KeyCode.A) ? 1f : 0f);
+                __result = alt ? 0f : (Input.GetKey(KeyCode.D) ? 1f : 0f) - (Input.GetKey(KeyCode.A) ? 1f : 0f);
                 return false;
             }
             if (JKJJKBAFNMO == "VerticalMove")
             {
-                __result = (Input.GetKey(KeyCode.W) ? 1f : 0f) - (Input.GetKey(KeyCode.S) ? 1f : 0f);
+                __result = alt ? 0f : (Input.GetKey(KeyCode.W) ? 1f : 0f) - (Input.GetKey(KeyCode.S) ? 1f : 0f);
                 return false;
             }
             return true;

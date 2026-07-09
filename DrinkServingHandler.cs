@@ -20,7 +20,7 @@ namespace TravellersRestAccess
     {
         private int _lastDigit = -1;
         private float _lastDigitTime = -999f;
-        private const float DoubleTapWindow = 0.5f;
+        private const float DoubleTapWindow = 0.9f;   // widened (user: double-tap was failing, window too short)
 
         // Only act while serving: in the player's tavern OR during the banquet competition. Outside
         // both, the Alt bar / X / F3 stay completely silent (user: "fora da taverna e da competição
@@ -100,6 +100,27 @@ namespace TravellersRestAccess
                 return list;
             }
 
+            // Diagnostic: dump BOTH candidate sources with position + isBeerTap, so the log shows
+            // exactly which dispensers are the ones behind the bar counter (user: "só os recipientes
+            // na sala de jantar, atrás do balcão").
+            if (Main.DebugMode)
+            {
+                try
+                {
+                    var bar0 = Bar.instance;
+                    if (bar0 != null && bar0.beerTaps != null)
+                        foreach (var tap in bar0.beerTaps)
+                            if (tap != null && tap.drinkDispenser != null)
+                                DebugLogger.LogState($"DrinkServing DIAG beerTap: id={tap.id} drink={SlotDrink(tap.drinkDispenser.slots)} pos={tap.drinkDispenser.transform.position}");
+                    var ddm0 = DrinkDispensersManager.GGFJGHHHEJC;
+                    if (ddm0 != null && ddm0.allDrinkDispensers != null)
+                        foreach (var dd in ddm0.allDrinkDispensers)
+                            if (dd != null)
+                                DebugLogger.LogState($"DrinkServing DIAG allDisp: isBeerTap={dd.isBeerTap} drink={SlotDrink(dd.slots)} pos={dd.transform.position}");
+                }
+                catch { }
+            }
+
             try
             {
                 var bar = Bar.instance;
@@ -109,7 +130,6 @@ namespace TravellersRestAccess
                         if (tap == null || tap.drinkDispenser == null) continue;
                         var dd = tap.drinkDispenser;
                         string drink = SlotDrink(dd.slots);
-                        if (Main.DebugMode) DebugLogger.LogState($"DrinkServing tap: id={tap.id} drink={drink}");
                         if (string.IsNullOrEmpty(drink)) continue;   // skip empty taps
                         list.Add(new Disp { drink = drink, pour = () => PourFromSlots(dd.slots) });
                         if (list.Count >= 10) return list;
@@ -221,9 +241,7 @@ namespace TravellersRestAccess
                     {
                         if (npc == null || npc.customer == null || npc.customer.currentRequest == null) continue;
                         string want = ReqName(npc.customer.currentRequest);
-                        bool ok = false;
-                        try { ok = npc.customer.ServeCustomer(1, NLCDDFDGACP: true, DOGOFILIHPJ: tray, NAKCFGEAGHH: null); } catch (System.Exception e) { if (Main.DebugMode) DebugLogger.LogState($"DrinkServing: tavern serve error {e.Message}"); }
-                        ScreenReader.Say(ok ? $"Servido {want} ao cliente" : $"Não consegui servir {want}", interrupt: true);
+                        AnnounceServe(() => npc.customer.ServeCustomer(1, NLCDDFDGACP: true, DOGOFILIHPJ: tray, NAKCFGEAGHH: null), want);
                         return;
                     }
             }
@@ -238,15 +256,27 @@ namespace TravellersRestAccess
                     {
                         if (c == null || c.currentRequest == null) continue;
                         string want = ReqName(c.currentRequest);
-                        bool ok = false;
-                        try { ok = c.ServeCustomer(1, NLCDDFDGACP: true, DOGOFILIHPJ: tray); } catch (System.Exception e) { if (Main.DebugMode) DebugLogger.LogState($"DrinkServing: banquet serve error {e.Message}"); }
-                        ScreenReader.Say(ok ? $"Servido {want} ao cliente" : $"Não consegui servir {want}", interrupt: true);
+                        AnnounceServe(() => c.ServeCustomer(1, NLCDDFDGACP: true, DOGOFILIHPJ: tray), want);
                         return;
                     }
             }
             catch { }
 
             ScreenReader.Say("Nenhum cliente na fila", interrupt: true);
+        }
+
+        // ServeCustomer can return false even when it actually served (user: "diz que não serviu
+        // mesmo servindo"), so judge success by whether a drink actually left the tray, and always
+        // say WHAT was served.
+        private void AnnounceServe(System.Func<bool> serve, string want)
+        {
+            int before = TrayCount();
+            bool ret = false;
+            try { ret = serve(); } catch (System.Exception e) { if (Main.DebugMode) DebugLogger.LogState($"DrinkServing: serve error {e.Message}"); }
+            int after = TrayCount();
+            bool served = ret || after < before;
+            ScreenReader.Say(served ? $"{want} servido ao cliente" : $"Não consegui servir {want}", interrupt: true);
+            if (Main.DebugMode) DebugLogger.LogState($"DrinkServing: serve \"{want}\" ret={ret} tray {before}->{after} served={served}");
         }
     }
 }

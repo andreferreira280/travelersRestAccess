@@ -135,6 +135,7 @@ namespace TravellersRestAccess
                     SpaceClosePatch.Apply(_harmony);
                     TutorialTracePatch.Apply(_harmony);
                     MovementAxisPatch.Apply(_harmony);
+                    HotbarBlockPatch.Apply(_harmony);
                     HotbarSwapPatch.Apply(_harmony);
                     CleaningDebugPatch.Apply(_harmony);
                     TavernStatsPatch.Apply(_harmony);
