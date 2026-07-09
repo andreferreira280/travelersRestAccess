@@ -68,6 +68,12 @@ namespace TravellersRestAccess
         // ---- Dispensers (dynamic; tavern taps + banquet barrels; capped at 10) ----
         private class Disp { public string drink; public System.Func<bool> pour; }
 
+        private static bool InTavern()
+        {
+            try { var p = PlayerController.GetPlayer(1); return p != null && p.LEOIMFNKFGA == Location.Tavern; }
+            catch { return false; }
+        }
+
         private static bool BanquetActive()
         {
             try { return BanquetOrdersManager.instance != null; } catch { return false; }
@@ -77,10 +83,10 @@ namespace TravellersRestAccess
         {
             var list = new List<Disp>();
 
-            // During a banquet, use ONLY the banquet barrels. Otherwise (tavern) use ONLY the bar's
-            // 3 serving TAPS (Bar.beerTaps) - NOT DrinkDispensersManager.allDrinkDispensers, which
-            // also holds cellar/aging barrels (the log showed 6). Slot 0 holds the assigned drink.
-            if (BanquetActive())
+            // In the TAVERN, ALWAYS use the bar's serving taps - even if a banquet's manager is still
+            // alive (it was leaking the competition barrels into the tavern: user "está mostrando só
+            // os de competição"). Only outside the tavern, during a banquet, use the banquet barrels.
+            if (!InTavern() && BanquetActive())
             {
                 try
                 {
