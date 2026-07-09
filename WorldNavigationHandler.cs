@@ -3082,6 +3082,17 @@ namespace TravellersRestAccess
                 if (Vector3.Distance(playerPos, bath.transform.position) > NearbyDoorRadius) continue;
                 list.Add(("Banho quente", GetApproachPosition(bath.gameObject, playerPos), "Pendentes"));
             }
+
+            // Interactable forms (castle "Preencher" forms) - user wants the ones still to fill in
+            // "Pendentes". ICNNAEDJNLH is true once a form is made/filled, so skip those.
+            foreach (var form in FindAll<InteractableForm>())
+            {
+                if (form == null || Vector3.Distance(playerPos, form.transform.position) > NearbyDoorRadius) continue;
+                bool made = false;
+                try { made = form.ICNNAEDJNLH; } catch { }
+                if (made) continue;
+                list.Add(("Formulário para preencher", GetApproachPosition(form.gameObject, playerPos), "Pendentes"));
+            }
             // Mailbox (user: "caixa de correio não está em maquinas"). PostBox is IInteractable, not a
             // Placeable in the nav's usual scan, so add it here like the well.
             foreach (var pbx in FindAll<PostBox>())
