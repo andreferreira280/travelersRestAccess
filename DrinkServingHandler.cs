@@ -121,7 +121,12 @@ namespace TravellersRestAccess
                 if (ddm0 != null && ddm0.allDrinkDispensers != null)
                     foreach (var dd in ddm0.allDrinkDispensers)
                         if (dd != null)
-                            MelonLoader.MelonLogger.Msg($"DrinkServing DIAG allDisp: isBeerTap={dd.isBeerTap} id={dd.drinkDispenserId} drink={SlotDrink(dd.slots)} pos={dd.transform.position}");
+                        {
+                            var slotDump = new System.Text.StringBuilder();
+                            try { if (dd.slots != null) for (int i = 0; i < dd.slots.Length; i++) slotDump.Append($"[{i}]={ItemName(dd.slots[i]?.itemInstance)} "); } catch { }
+                            string last = null; try { last = ItemName(dd.lastDrink); } catch { }
+                            MelonLoader.MelonLogger.Msg($"DrinkServing DIAG allDisp: isBeerTap={dd.isBeerTap} id={dd.drinkDispenserId} lastDrink={last} slots={slotDump} pos={dd.transform.position}");
+                        }
             }
             catch { }
 
@@ -173,6 +178,12 @@ namespace TravellersRestAccess
                 return tray.FEEOFAGCONJ(item.KDNBBPJCNDJ(inst), null);
             }
             catch (System.Exception e) { if (Main.DebugMode) DebugLogger.LogState($"DrinkServing: PourFromSlots error {e.Message}"); return false; }
+        }
+
+        private static string ItemName(ItemInstance inst)
+        {
+            try { var it = inst != null ? inst.LHBPOPOIFLE() : null; return it != null ? it.IABAKHPEOAF() : null; }
+            catch { return null; }
         }
 
         private static string SlotDrink(Slot[] slots)
