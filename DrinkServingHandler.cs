@@ -20,7 +20,8 @@ namespace TravellersRestAccess
     {
         private int _lastDigit = -1;
         private float _lastDigitTime = -999f;
-        private const float DoubleTapWindow = 0.9f;   // widened (user: double-tap was failing, window too short)
+        private const float DoubleTapWindow = 1.5f;   // forgiving window: accept the 2nd press whether it comes
+                                                       // very fast OR a bit slower (user: double-tap failing both ways)
 
         // Only act while serving: in the player's tavern OR during the banquet competition. Outside
         // both, the Alt bar / X / F3 stay completely silent (user: "fora da taverna e da competição

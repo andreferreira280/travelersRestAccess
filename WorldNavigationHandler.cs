@@ -758,7 +758,14 @@ namespace TravellersRestAccess
                 // un-snapped float position, so it always exhausted its search and failed.
                 // Snapping both ends with the same function the game itself uses elsewhere
                 // for this exact purpose fixes it.
-                _lastPathRequestStart = Utils.MJEACANINDN(from);
+                // Snap the START to the nearest free PathNode. When the player stands ON a passage
+                // trigger / door cell (which the pathfinder marks non-free even though you can stand
+                // there), A* can't even begin and returns "no route" - confirmed in the city log:
+                // standing right on "TravelZone-CityToPetShop" (goal 0.5 units away, itself a valid
+                // free node) still failed every frame ("Sem rota, tente ir pra direita"). Snapping to
+                // a walkable neighbour is a no-op when `from` is already free (the normal case).
+                Vector3 snappedFrom = SnapToWalkableTile(from, from, null, SafeLoc(from));
+                _lastPathRequestStart = Utils.MJEACANINDN(snappedFrom);
                 var info = new PathRequestInfo
                 {
                     startPos = _lastPathRequestStart,
@@ -3023,6 +3030,11 @@ namespace TravellersRestAccess
                 if (rawNpc.Contains("Door") || rawNpc.Contains("Buzz") || rawNpc.Contains("Mudanza")) continue;
                 string npcName = DescribeNpc(npc);
                 if (string.IsNullOrEmpty(npcName)) continue;
+                // Woody (Serraria) and Petra (Ferraria) live INSIDE their buildings. Only track them
+                // when the player is actually in that building - outside, their route was "buga"
+                // (user: "só deve ser rastreado na categoria se estiver dentro da serraria/forja").
+                if (npcName == "Woody" && playerLocation != Location.Sawmill) continue;
+                if (npcName == "Petra" && playerLocation != Location.Blacksmith) continue;
                 bool isMerchant = MerchantWares.TryGetValue(npcName, out var wares);
                 // Merchants get a WIDER radius than normal NPCs so all merchants of the current AREA
                 // show together (city merchants in the city, Holly/Bob near the farm) - but NOT the
