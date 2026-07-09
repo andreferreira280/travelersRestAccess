@@ -27,9 +27,12 @@ namespace TravellersRestAccess
         // não deve mencionar nada nem servir").
         private static bool InServingContext()
         {
+            // BanquetDrinksManager is a PERSISTENT scene singleton (always non-null), so it can't
+            // gate context. A banquet is really on only while BanquetOrdersManager.instance exists
+            // (it's nulled when the banquet ends). Otherwise, serving happens in the tavern.
             try
             {
-                if (BanquetOrdersManager.instance != null || BanquetDrinksManager.instance != null) return true;
+                if (BanquetOrdersManager.instance != null) return true;
                 var p = PlayerController.GetPlayer(1);
                 return p != null && p.LEOIMFNKFGA == Location.Tavern;
             }
@@ -62,39 +65,54 @@ namespace TravellersRestAccess
         // ---- Dispensers (dynamic; tavern taps + banquet barrels; capped at 10) ----
         private class Disp { public string drink; public System.Func<bool> pour; }
 
+        private static bool BanquetActive()
+        {
+            try { return BanquetOrdersManager.instance != null; } catch { return false; }
+        }
+
         private List<Disp> BuildDispensers()
         {
             var list = new List<Disp>();
+
+            // During a banquet, use ONLY the banquet barrels. Otherwise (tavern) use ONLY the bar's
+            // serving taps. Before, both were merged - and BanquetDrinksManager is a persistent scene
+            // singleton, so its barrels leaked into the tavern list ("recipientes que não tenho").
+            if (BanquetActive())
+            {
+                try
+                {
+                    var bdm = BanquetDrinksManager.instance;
+                    if (bdm != null && bdm.banquetBarrels != null)
+                        foreach (var b in bdm.banquetBarrels)
+                        {
+                            if (b == null) continue;
+                            string drink = SlotDrink(b.slots);
+                            if (Main.DebugMode) DebugLogger.LogState($"DrinkServing barrel candidate: drink={drink}");
+                            if (string.IsNullOrEmpty(drink)) continue;
+                            var bb = b;
+                            list.Add(new Disp { drink = drink, pour = () => { DrinkDispenser.FinishPull(1, bb.slots[0], bb.work, PFFAMHBDDMA: false); return true; } });
+                            if (list.Count >= 10) return list;
+                        }
+                }
+                catch { }
+                return list;
+            }
+
             try
             {
-                // The tavern's actual placed dispensers - NOT Bar.beerTaps (which listed many/ghosts).
-                // allDrinkDispensers is exactly the recipients the player built; empty ones (no drink)
-                // are filtered out. Rebuilt every press, so adding one or changing its drink updates.
                 var ddm = DrinkDispensersManager.GGFJGHHHEJC;
                 if (ddm != null && ddm.allDrinkDispensers != null)
                     foreach (var dd in ddm.allDrinkDispensers)
                     {
                         if (dd == null) continue;
-                        if (!dd.isBeerTap) continue;                 // only the bar SERVING taps, not cellar/storage barrels (why "várias" appeared)
-                        string drink = SlotDrink(dd.slots);
-                        if (string.IsNullOrEmpty(drink)) continue;   // skip empty dispensers
+                        string cand = SlotDrink(dd.slots);
+                        string pName = null;
+                        try { pName = dd.placeable != null ? dd.placeable.gameObject.name : null; } catch { }
+                        if (Main.DebugMode) DebugLogger.LogState($"DrinkServing tap candidate: isBeerTap={dd.isBeerTap} drink={cand} placeable={pName}");
+                        if (!dd.isBeerTap) continue;                 // only the bar SERVING taps, not cellar/storage barrels
+                        if (string.IsNullOrEmpty(cand)) continue;    // skip empty
                         var d = dd;
-                        list.Add(new Disp { drink = drink, pour = () => { DrinkDispenser.FinishPull(1, d.slots[0], d.work, PFFAMHBDDMA: false, d); return true; } });
-                        if (list.Count >= 10) return list;
-                    }
-            }
-            catch { }
-            try
-            {
-                var bom = BanquetDrinksManager.instance;
-                if (bom != null && bom.banquetBarrels != null)
-                    foreach (var b in bom.banquetBarrels)
-                    {
-                        if (b == null) continue;
-                        var bb = b;
-                        string drink = SlotDrink(bb.slots);
-                        if (string.IsNullOrEmpty(drink)) continue;   // skip empty barrels
-                        list.Add(new Disp { drink = drink, pour = () => { DrinkDispenser.FinishPull(1, bb.slots[0], bb.work, PFFAMHBDDMA: false); return true; } });
+                        list.Add(new Disp { drink = cand, pour = () => { DrinkDispenser.FinishPull(1, d.slots[0], d.work, PFFAMHBDDMA: false, d); return true; } });
                         if (list.Count >= 10) return list;
                     }
             }
