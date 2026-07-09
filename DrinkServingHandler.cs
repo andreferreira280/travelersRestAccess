@@ -106,38 +106,52 @@ namespace TravellersRestAccess
                 return list;
             }
 
-            // Diagnostic: dump BOTH candidate sources with position + isBeerTap, so the log shows
-            // exactly which dispensers are the ones behind the bar counter (user: "só os recipientes
-            // na sala de jantar, atrás do balcão").
-            if (Main.DebugMode)
+            // Diagnostic ALWAYS logged (not gated on F12/DebugMode), so I get the data even when the
+            // user forgets F12. Dumps every dispenser with isBeerTap + drink + position.
+            try
             {
-                try
-                {
-                    var bar0 = Bar.instance;
-                    if (bar0 != null && bar0.beerTaps != null)
-                        foreach (var tap in bar0.beerTaps)
-                            if (tap != null && tap.drinkDispenser != null)
-                                DebugLogger.LogState($"DrinkServing DIAG beerTap: id={tap.id} drink={SlotDrink(tap.drinkDispenser.slots)} pos={tap.drinkDispenser.transform.position}");
-                    var ddm0 = DrinkDispensersManager.GGFJGHHHEJC;
-                    if (ddm0 != null && ddm0.allDrinkDispensers != null)
-                        foreach (var dd in ddm0.allDrinkDispensers)
-                            if (dd != null)
-                                DebugLogger.LogState($"DrinkServing DIAG allDisp: isBeerTap={dd.isBeerTap} drink={SlotDrink(dd.slots)} pos={dd.transform.position}");
-                }
-                catch { }
+                int bt = 0;
+                var bar0 = Bar.instance;
+                if (bar0 != null && bar0.beerTaps != null)
+                    foreach (var tap in bar0.beerTaps)
+                        if (tap != null && tap.drinkDispenser != null)
+                        { bt++; MelonLoader.MelonLogger.Msg($"DrinkServing DIAG beerTap: id={tap.id} drink={SlotDrink(tap.drinkDispenser.slots)} pos={tap.drinkDispenser.transform.position}"); }
+                MelonLoader.MelonLogger.Msg($"DrinkServing DIAG beerTaps total={bt}");
+                var ddm0 = DrinkDispensersManager.GGFJGHHHEJC;
+                if (ddm0 != null && ddm0.allDrinkDispensers != null)
+                    foreach (var dd in ddm0.allDrinkDispensers)
+                        if (dd != null)
+                            MelonLoader.MelonLogger.Msg($"DrinkServing DIAG allDisp: isBeerTap={dd.isBeerTap} id={dd.drinkDispenserId} drink={SlotDrink(dd.slots)} pos={dd.transform.position}");
             }
+            catch { }
 
+            // Source: Bar.beerTaps was EMPTY at runtime, so use the placed dispensers filtered by
+            // isBeerTap (the bar SERVING taps, not cellar/aging). If beerTaps ever populates, prefer it.
             try
             {
                 var bar = Bar.instance;
-                if (bar != null && bar.beerTaps != null)
+                if (bar != null && bar.beerTaps != null && bar.beerTaps.Count > 0)
+                {
                     foreach (var tap in bar.beerTaps)
                     {
                         if (tap == null || tap.drinkDispenser == null) continue;
                         var dd = tap.drinkDispenser;
                         string drink = SlotDrink(dd.slots);
-                        if (string.IsNullOrEmpty(drink)) continue;   // skip empty taps
+                        if (string.IsNullOrEmpty(drink)) continue;
                         list.Add(new Disp { drink = drink, pour = () => PourFromSlots(dd.slots) });
+                        if (list.Count >= 10) return list;
+                    }
+                    return list;
+                }
+                var ddm = DrinkDispensersManager.GGFJGHHHEJC;
+                if (ddm != null && ddm.allDrinkDispensers != null)
+                    foreach (var dd in ddm.allDrinkDispensers)
+                    {
+                        if (dd == null || !dd.isBeerTap) continue;
+                        string drink = SlotDrink(dd.slots);
+                        if (string.IsNullOrEmpty(drink)) continue;
+                        var d = dd;
+                        list.Add(new Disp { drink = drink, pour = () => PourFromSlots(d.slots) });
                         if (list.Count >= 10) return list;
                     }
             }
