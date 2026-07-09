@@ -51,15 +51,18 @@ namespace TravellersRestAccess
             var list = new List<Disp>();
             try
             {
-                var bar = Bar.instance;
-                if (bar != null && bar.beerTaps != null)
-                    foreach (var tap in bar.beerTaps)
+                // The tavern's actual placed dispensers - NOT Bar.beerTaps (which listed many/ghosts).
+                // allDrinkDispensers is exactly the recipients the player built; empty ones (no drink)
+                // are filtered out. Rebuilt every press, so adding one or changing its drink updates.
+                var ddm = DrinkDispensersManager.GGFJGHHHEJC;
+                if (ddm != null && ddm.allDrinkDispensers != null)
+                    foreach (var dd in ddm.allDrinkDispensers)
                     {
-                        if (tap == null || tap.drinkDispenser == null) continue;
-                        var dd = tap.drinkDispenser;
+                        if (dd == null) continue;
                         string drink = SlotDrink(dd.slots);
-                        if (string.IsNullOrEmpty(drink)) continue;   // skip empty/unset dispensers (user: only list the ones with a drink)
-                        list.Add(new Disp { drink = drink, pour = () => { DrinkDispenser.FinishPull(1, dd.slots[0], dd.work, PFFAMHBDDMA: false, dd); return true; } });
+                        if (string.IsNullOrEmpty(drink)) continue;   // skip empty dispensers
+                        var d = dd;
+                        list.Add(new Disp { drink = drink, pour = () => { DrinkDispenser.FinishPull(1, d.slots[0], d.work, PFFAMHBDDMA: false, d); return true; } });
                         if (list.Count >= 10) return list;
                     }
             }
