@@ -1969,6 +1969,20 @@ namespace TravellersRestAccess
             // Recipe fragments the player currently has (user: "no f4 deveria dizer tb quantos
             // fragmentos tenho"). RecipesManager.recipeFragments is the live available count.
             try { parts.Add($"{RecipesManager.recipeFragments} fragmentos de receita"); } catch { }
+            // Comfort of the zone the player is standing in - the same value the visual comfort bar
+            // shows (TavernZone.comfort for the player's current zoneIndex; user: "f4 tb informe em
+            // quanto está o conforto da taverna").
+            try
+            {
+                var p = PlayerController.GetPlayer(1);
+                var tzm = TavernZonesManager.GGFJGHHHEJC;
+                if (p != null && tzm != null)
+                {
+                    var zone = tzm.GetTavernZone(p.zoneIndex);
+                    if (zone != null) parts.Add($"Conforto: {zone.comfort}");
+                }
+            }
+            catch { }
             ScreenReader.Announce(parts.Count > 0 ? string.Join(". ", parts) : "Reputação indisponível");
         }
 
