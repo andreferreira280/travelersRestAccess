@@ -50,6 +50,7 @@ namespace TravellersRestAccess
         private DecorationModeHandler _decorationModeHandler;
         private FuelStationHandler _fuelStationHandler;
         private DrinkServingHandler _drinkServingHandler;
+        private TableArrangeHandler _tableArrangeHandler;
         private float _lastGateLog; // throttle for the read-only input-gate diagnostic
 
         // "Carregando jogo..." kept getting cut off almost immediately by
@@ -85,6 +86,7 @@ namespace TravellersRestAccess
             _decorationModeHandler = new DecorationModeHandler();
             _fuelStationHandler = new FuelStationHandler();
             _drinkServingHandler = new DrinkServingHandler();
+            _tableArrangeHandler = new TableArrangeHandler();
         }
 
         private IEnumerator AnnounceStartupDelayed()
@@ -278,6 +280,7 @@ namespace TravellersRestAccess
             _decorationModeHandler.Update();
             _fuelStationHandler.Update();
             _drinkServingHandler.Update();
+            _tableArrangeHandler.Update(anyUiOpen);
             // The FuelUI (oven/malt/fermentation fuel) is owned entirely by FuelStationHandler.
             // Skip the transfer handler there so its Ctrl+Enter routing can't fire alongside the
             // fuel add (that double-handling is what scrambled the hotbar in the reverted attempts).
