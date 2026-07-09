@@ -2026,6 +2026,11 @@ namespace TravellersRestAccess
             catch { return "Receita"; }
         }
 
+        // IngredientGroup.possibleItems (private) - the accepted items for groups that don't use
+        // ingredientsTypes; used to count owned when the type-based lookup finds none.
+        private static readonly System.Reflection.FieldInfo _ingGroupPossibleItems =
+            HarmonyLib.AccessTools.Field(typeof(IngredientGroup), "possibleItems");
+
         private static string DescribeRecipeListEntry(RecipeSlot entry)
         {
             var recipe = entry.recipe;
@@ -2060,6 +2065,14 @@ namespace TravellersRestAccess
                             {
                                 var slots = CraftingInventory.GetSlotsOfSpecificIngredientTypes(1, types, null, recipe.ingredientsNeeded);
                                 if (slots != null) foreach (var sl in slots) if (sl != null && sl.itemInstance != null) owned += sl.Stack;
+                            }
+                            // Some groups have NO ingredientsTypes (log: "Folhas de chá", "Leite"
+                            // typesCount=0) - they list their accepted items in possibleItems instead.
+                            // Fall back to counting those via the game's ItemMod-list overload.
+                            if (owned == 0 && _ingGroupPossibleItems != null)
+                            {
+                                var pil = _ingGroupPossibleItems.GetValue(grp) as System.Collections.Generic.List<ItemMod>;
+                                if (pil != null && pil.Count > 0) owned = CraftingInventory.NumberOfItems(1, pil);
                             }
                             if (Main.DebugMode) DebugLogger.LogState($"RecipeIng GROUP \"{iName}\" typesCount={(types?.Count ?? -1)} owned={owned}");
                         }

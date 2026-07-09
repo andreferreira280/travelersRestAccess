@@ -164,6 +164,12 @@ namespace TravellersRestAccess
             _polledHotbarIndex = (slots != null && newIndex >= 0 && newIndex < slots.Length) ? newIndex : -1;
             _polledHotbarStack = stack;
 
+            // Don't announce the hotbar while Alt is held: Alt+digit is the drink-serving shortcut
+            // (DrinkServingHandler), and the game still fires this hotbar selection on the same
+            // digit, so the user heard the hotbar item on top of the drink action (user report).
+            bool altHeld = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
+            if (altHeld) return;
+
             string announcement = string.IsNullOrEmpty(itemName)
                 ? $"Uso rápido {newIndex + 1} vazio"
                 : (stack > 1 ? $"{itemName} selecionado, {stack}" : $"{itemName} selecionado");

@@ -57,7 +57,9 @@ namespace TravellersRestAccess
                     {
                         if (tap == null || tap.drinkDispenser == null) continue;
                         var dd = tap.drinkDispenser;
-                        list.Add(new Disp { drink = SlotDrink(dd.slots), pour = () => { DrinkDispenser.FinishPull(1, dd.slots[0], dd.work, PFFAMHBDDMA: false, dd); return true; } });
+                        string drink = SlotDrink(dd.slots);
+                        if (string.IsNullOrEmpty(drink)) continue;   // skip empty/unset dispensers (user: only list the ones with a drink)
+                        list.Add(new Disp { drink = drink, pour = () => { DrinkDispenser.FinishPull(1, dd.slots[0], dd.work, PFFAMHBDDMA: false, dd); return true; } });
                         if (list.Count >= 10) return list;
                     }
             }
@@ -70,7 +72,9 @@ namespace TravellersRestAccess
                     {
                         if (b == null) continue;
                         var bb = b;
-                        list.Add(new Disp { drink = SlotDrink(bb.slots), pour = () => { DrinkDispenser.FinishPull(1, bb.slots[0], bb.work, PFFAMHBDDMA: false); return true; } });
+                        string drink = SlotDrink(bb.slots);
+                        if (string.IsNullOrEmpty(drink)) continue;   // skip empty barrels
+                        list.Add(new Disp { drink = drink, pour = () => { DrinkDispenser.FinishPull(1, bb.slots[0], bb.work, PFFAMHBDDMA: false); return true; } });
                         if (list.Count >= 10) return list;
                     }
             }
