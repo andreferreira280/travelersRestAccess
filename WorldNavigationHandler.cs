@@ -46,7 +46,7 @@ namespace TravellersRestAccess
         // request, and a new "Repositivos" category for placed consumables that are working but
         // will need restocking (candles). Associated benches leave "Pendentes" automatically (see
         // BuildTargetList - only unassociated benches are listed now).
-        private static readonly string[] CategoryOrder = { "Portas", "Comerciantes", "NPCs", "Animais", "Pendentes", "Repositivos", "Containers", "Máquinas", "Cultivo", "Materiais", "Coletáveis", "Decorativos" };
+        private static readonly string[] CategoryOrder = { "Servir", "Portas", "Comerciantes", "NPCs", "Animais", "Pendentes", "Repositivos", "Containers", "Máquinas", "Cultivo", "Materiais", "Coletáveis", "Decorativos" };
 
         // The town/region merchants and what each sells (from the wiki, provided by the user). Used to
         // put them in their own "Comerciantes" category (out of "NPCs") with a description, and to let
@@ -3100,6 +3100,12 @@ namespace TravellersRestAccess
                 if (made) continue;
                 list.Add(("Formulário para preencher", GetApproachPosition(form.gameObject, playerPos), "Pendentes"));
             }
+
+            // Serving drinks (banquet competition AND the tavern): customers waiting with an order
+            // (CustomerBase.currentRequest = the drink ItemInstance) go under "Servir", so the blind
+            // player can find each one and hear what to bring. Round 246: first piece of the
+            // drink-serving system (user: "inicie... o mesmo sistema pra servir drinks na taverna").
+            AddServingCustomers(list, playerPos);
             // Mailbox (user: "caixa de correio não está em maquinas"). PostBox is IInteractable, not a
             // Placeable in the nav's usual scan, so add it here like the well.
             foreach (var pbx in FindAll<PostBox>())
@@ -4883,6 +4889,45 @@ namespace TravellersRestAccess
         private Vector2Int _lastResourceTile = new Vector2Int(int.MinValue, int.MinValue);
 
         private int _sceneScanStage = -1; // -1 = idle; >=0 = the scan to run THIS frame
+
+        // Drink-serving: list every customer currently waiting with an order, both the banquet
+        // competition (BanquetOrdersManager.tableOrders) and the ordinary tavern (Bar.waitingAtBar),
+        // under "Servir" with the drink they want (CustomerBase.currentRequest).
+        private static string DrinkRequestName(ItemInstance inst)
+        {
+            try { var it = inst != null ? inst.LHBPOPOIFLE() : null; return it != null ? it.IABAKHPEOAF() : "bebida"; }
+            catch { return "bebida"; }
+        }
+
+        private void AddServingCustomers(List<(string name, Vector3 position, string category)> list, Vector3 playerPos)
+        {
+            try
+            {
+                var bom = BanquetOrdersManager.instance;
+                if (bom != null && bom.tableOrders != null)
+                {
+                    foreach (var cust in bom.tableOrders)
+                    {
+                        if (cust == null || cust.currentRequest == null) continue;
+                        list.Add(($"Cliente quer {DrinkRequestName(cust.currentRequest)}", GetApproachPosition(cust.gameObject, playerPos), "Servir"));
+                    }
+                }
+            }
+            catch { }
+            try
+            {
+                var bar = Bar.instance;
+                if (bar != null && bar.waitingAtBar != null)
+                {
+                    foreach (var npc in bar.waitingAtBar)
+                    {
+                        if (npc == null || npc.customer == null || npc.customer.currentRequest == null) continue;
+                        list.Add(($"Cliente quer {DrinkRequestName(npc.customer.currentRequest)}", GetApproachPosition(npc.gameObject, playerPos), "Servir"));
+                    }
+                }
+            }
+            catch { }
+        }
 
         // True in the mine/quarry areas, where tavern furniture (seats/tables/wells/candles) and
         // trees/animals/farm soil don't exist - used to skip those full-scene scans (lag fix).
