@@ -22,8 +22,24 @@ namespace TravellersRestAccess
         private float _lastDigitTime = -999f;
         private const float DoubleTapWindow = 0.5f;
 
+        // Only act while serving: in the player's tavern OR during the banquet competition. Outside
+        // both, the Alt bar / X / F3 stay completely silent (user: "fora da taverna e da competição
+        // não deve mencionar nada nem servir").
+        private static bool InServingContext()
+        {
+            try
+            {
+                if (BanquetOrdersManager.instance != null || BanquetDrinksManager.instance != null) return true;
+                var p = PlayerController.GetPlayer(1);
+                return p != null && p.LEOIMFNKFGA == Location.Tavern;
+            }
+            catch { return false; }
+        }
+
         public void Update()
         {
+            if (!InServingContext()) return;
+
             bool alt = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
             if (alt)
             {
@@ -59,6 +75,7 @@ namespace TravellersRestAccess
                     foreach (var dd in ddm.allDrinkDispensers)
                     {
                         if (dd == null) continue;
+                        if (!dd.isBeerTap) continue;                 // only the bar SERVING taps, not cellar/storage barrels (why "várias" appeared)
                         string drink = SlotDrink(dd.slots);
                         if (string.IsNullOrEmpty(drink)) continue;   // skip empty dispensers
                         var d = dd;
