@@ -2015,7 +2015,25 @@ namespace TravellersRestAccess
                     if (ing.item == null) continue;
                     string iName = ing.item.IABAKHPEOAF();
                     if (string.IsNullOrEmpty(iName)) iName = "ingrediente";
-                    int owned = pi != null ? pi.NumberOfItems(ing.item.JDJGFAACPFC()) : 0;
+                    // An ingredient can be an IngredientGroup ("any grain", "any meat") - counting a
+                    // single item ID then wrongly reads "tem 0" even when you have a compatible item
+                    // (user: "tinha grãos/carne e diz que não tem"). For a group, count every slot
+                    // whose ingredient TYPE matches, via the game's own type-aware lookup.
+                    int owned = 0;
+                    try
+                    {
+                        if (ing.item is IngredientGroup grp && grp.ingredientsTypes != null)
+                        {
+                            var types = new System.Collections.Generic.List<IngredientType>(grp.ingredientsTypes);
+                            var slots = CraftingInventory.GetSlotsOfSpecificIngredientTypes(1, types, null, recipe.ingredientsNeeded);
+                            if (slots != null) foreach (var sl in slots) if (sl != null) owned += sl.Stack;
+                        }
+                        else
+                        {
+                            owned = pi != null ? pi.NumberOfItems(ing.item.JDJGFAACPFC()) : 0;
+                        }
+                    }
+                    catch { owned = pi != null ? pi.NumberOfItems(ing.item.JDJGFAACPFC()) : 0; }
                     if (owned < ing.amount) canCraft = false;
                     parts.Add($"{iName} {ing.amount}, tem {owned}");
                 }
