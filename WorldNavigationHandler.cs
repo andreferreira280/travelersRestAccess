@@ -1174,6 +1174,13 @@ namespace TravellersRestAccess
                 var exits = tzm.allTravelZones[playerLoc];
                 if (exits == null || exits.Count == 0) return null;
 
+                // Route to the passage square on the PLAYER's side, snapped to a walkable tile in the
+                // player's own (loaded) area - NOT the raw TravelZone.position, which can be the square
+                // on the DESTINATION side (unloaded area). That was why city->road etc. came back
+                // "Sem rota" / only estimated: the fallback goal (e.g. "Estrada" at 6,903) sat in the
+                // Road area, unreachable from the city. Same fix as direct passage targets.
+                Vector3 pp = PlayerController.GetPlayerPosition(1);
+
                 // BFS to find the next hop toward targetLoc (when it's a known Location).
                 if (targetLoc != Location.None && tzm.allTravelZones.ContainsKey(targetLoc))
                 {
@@ -1182,7 +1189,7 @@ namespace TravellersRestAccess
                     {
                         var tz = exits[nextHop];
                         string name = LocationNames.TryGetValue(nextHop, out var n) ? n : nextHop.ToString();
-                        return (name, tz.position);
+                        return (name, GetTravelZoneApproach(tz, pp));
                     }
                 }
 
@@ -1197,7 +1204,7 @@ namespace TravellersRestAccess
                     {
                         bestDist = dist;
                         string n = LocationNames.TryGetValue(kv.Key, out var ln) ? ln : "saída";
-                        best = (n, kv.Value.position);
+                        best = (n, GetTravelZoneApproach(kv.Value, pp));
                     }
                 }
                 return best;
