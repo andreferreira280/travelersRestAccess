@@ -66,7 +66,7 @@ namespace TravellersRestAccess
         }
 
         // ---- Dispensers (dynamic; tavern taps + banquet barrels; capped at 10) ----
-        private class Disp { public string drink; public System.Func<bool> pour; }
+        private class Disp { public string drink; public int count; public System.Func<bool> pour; }
 
         private static bool InTavern()
         {
@@ -106,19 +106,19 @@ namespace TravellersRestAccess
                 return list;
             }
 
-            // TAVERN SOURCE = ServiceBarrels (the recipients behind the counter). The counter taps /
-            // tea urn in DrinkDispensersManager.allDrinkDispensers are SINGLE-slot fixtures and read
-            // EMPTY; the actual drinks live in the ServiceBarrels' DrinkDispenser, which has TWO slots
-            // (slot[0]=left barrel, slot[1]=right barrel) and is NOT registered in that manager (proven
-            // by the log: 4 taps + 1 tea urn, all 1-slot, taps empty). So enumerate ServiceBarrels and
-            // read every non-empty slot. FindObjectsByType only runs on an Alt press, not per-frame.
-            ServiceBarrel[] barrels;
-            try { barrels = Object.FindObjectsByType<ServiceBarrel>(FindObjectsSortMode.None); }
-            catch { barrels = null; }
-            if (barrels == null) return list;
+            // TAVERN SOURCE = every serving recipient behind the counter: a DrinkDispenser that is
+            // either a beer tap (isBeerTap) or carries a ServiceBarrel component. The counter taps / tea
+            // urn registered in DrinkDispensersManager are only PART of these, so enumerate ALL
+            // DrinkDispensers in the scene and keep the serving ones. Read every slot whose drink is
+            // present AND Stack > 0, so the list REFRESHES: a refilled recipient appears and an emptied
+            // one drops off. FindObjectsByType only runs on an Alt press, not per-frame.
+            DrinkDispenser[] disps;
+            try { disps = Object.FindObjectsByType<DrinkDispenser>(FindObjectsSortMode.None); }
+            catch { disps = null; }
+            if (disps == null) return list;
 
             // Stable order for Alt 1..0: sort by position (x then y).
-            System.Array.Sort(barrels, (a, b) =>
+            System.Array.Sort(disps, (a, b) =>
             {
                 if (a == null || b == null) return 0;
                 var pa = a.transform.position; var pb = b.transform.position;
@@ -126,31 +126,33 @@ namespace TravellersRestAccess
                 return cx != 0 ? cx : pa.y.CompareTo(pb.y);
             });
 
-            // Chained barrels can share one DrinkDispenser - dedup by dispenser so a drink isn't listed
-            // twice.
-            var seen = new HashSet<DrinkDispenser>();
-            foreach (var sb in barrels)
+            foreach (var dd in disps)
             {
-                if (sb == null || sb.drinkDispenser == null) continue;
-                var dd = sb.drinkDispenser;
-                // DIAG (unconditional) so I can confirm where the drinks sit on the next test.
+                if (dd == null) continue;
+                bool isBarrel = false;
+                try { isBarrel = dd.GetComponent<ServiceBarrel>() != null; } catch { }
+                bool serving = dd.isBeerTap || isBarrel;
+                // DIAG (unconditional) so I can confirm where the drinks sit + quantities on next test.
                 try
                 {
                     var sd = new System.Text.StringBuilder();
-                    if (dd.slots != null) for (int i = 0; i < dd.slots.Length; i++) sd.Append($"[{i}]={ItemName(dd.slots[i]?.itemInstance)} ");
-                    MelonLoader.MelonLogger.Msg($"DrinkServing DIAG serviceBarrel: slotsLen={dd.slots?.Length} slots={sd} lastDrink={ItemName(dd.lastDrink)} isBeerTap={dd.isBeerTap} pos={sb.transform.position}");
+                    if (dd.slots != null) for (int i = 0; i < dd.slots.Length; i++)
+                    {
+                        var s = dd.slots[i];
+                        sd.Append($"[{i}]={ItemName(s?.itemInstance)}x{(s != null ? s.Stack : 0)} ");
+                    }
+                    MelonLoader.MelonLogger.Msg($"DrinkServing DIAG disp: serving={serving} isBeerTap={dd.isBeerTap} barrel={isBarrel} slotsLen={dd.slots?.Length} slots={sd} lastDrink={ItemName(dd.lastDrink)} pos={dd.transform.position}");
                 }
                 catch { }
-                if (!seen.Add(dd)) continue;
-                if (dd.slots == null) continue;
+                if (!serving || dd.slots == null) continue;
                 for (int i = 0; i < dd.slots.Length; i++)
                 {
                     var slot = dd.slots[i];
                     var inst = slot != null ? slot.itemInstance : null;
                     string drink = inst != null ? ItemName(inst) : null;
-                    if (string.IsNullOrEmpty(drink)) continue;
+                    if (string.IsNullOrEmpty(drink) || slot.Stack <= 0) continue;   // Stack>0 => refresh on empty
                     var captured = slot;
-                    list.Add(new Disp { drink = drink, pour = () => PourFromSlot(captured) });
+                    list.Add(new Disp { drink = drink, count = slot.Stack, pour = () => PourFromSlot(captured) });
                     if (list.Count >= 10) return list;
                 }
             }
@@ -202,7 +204,8 @@ namespace TravellersRestAccess
             var disps = BuildDispensers();
             if (index >= disps.Count) { ScreenReader.Say($"Não tem dispensador {digit} aqui", interrupt: true); return; }
             var d = disps[index];
-            ScreenReader.Say($"Dispensador {digit}: {(string.IsNullOrEmpty(d.drink) ? "vazio" : d.drink)}. Alt {digit} de novo pra servir na bandeja.", interrupt: true);
+            string qty = d.count > 0 ? $", {d.count}" : "";
+            ScreenReader.Say($"Dispensador {digit}: {(string.IsNullOrEmpty(d.drink) ? "vazio" : d.drink)}{qty}. Alt {digit} de novo pra servir na bandeja.", interrupt: true);
             if (Main.DebugMode) DebugLogger.LogState($"DrinkServing: announce disp {digit} drink={d.drink} (total={disps.Count})");
         }
 
