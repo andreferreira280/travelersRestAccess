@@ -3872,6 +3872,7 @@ namespace TravellersRestAccess
                 associateSeat.transform.position = c;
                 Physics2D.SyncTransforms();
                 if (!placeable.IsObjectInValidLocation(true)) continue;
+                associateSeat.table = null; // clear stale association before each candidate test
                 try { associateSeat.GetNeighbourTable(); } catch { }
                 if (associateSeat.table != null) { best = c; break; }
             }
@@ -4033,6 +4034,10 @@ namespace TravellersRestAccess
             _staticCachedTables = FindAll<Table>();
             _staticCachedSeats = FindAll<Seat>();
         }
+
+        // Force an immediate cache refresh on the next call (used by DriveAutoArrange between
+        // benches so tucked seat positions from the previous placement are seen as occupied).
+        public static void InvalidateStaticSceneCache() { _staticCacheTime = -999f; }
 
         // All empty seat slots across every table, nearest-first to `position`. Same emptiness test
         // as FindNearestEmptySlot (no non-held Seat within 0.3u). Used by the Alt+M auto-arranger to
@@ -4267,6 +4272,161 @@ namespace TravellersRestAccess
                 if (floorOk) freeUsable++; else freeBlocked++;
             }
             return (total, occupied, freeUsable, freeBlocked);
+        }
+
+        // Returns the distinct slot.direction values for blocked-empty slots of a table.
+        // A slot is "blocked-empty" when no seat is within 0.3u of the slot marker AND
+        // WorldGrid.LKBLKCFOEPA fails at the bench target position (floor doesn't exist there).
+        // slot.direction points FROM the table TOWARD the bench, so "blocked Left" means the
+        // left-side bench positions are outside valid floor - the table is too close to the left
+        // wall - and the table should be pushed RIGHT to open those positions.
+        public static HashSet<Direction> GetBlockedSlotDirections(Table table, Seat[] seats)
+        {
+            var dirs = new HashSet<Direction>();
+            if (table == null) return dirs;
+            var groups = SeatingGroupsField.GetValue(table) as SeatingGroup[];
+            if (groups == null) return dirs;
+            GameObject heldNow = null;
+            try { heldNow = SelectObject.GetPlayer(1)?.selectedGameObject; } catch { }
+            foreach (var group in groups)
+            {
+                if (group == null || group.transform == null) continue;
+                bool occ = false;
+                if (seats != null)
+                {
+                    foreach (var s in seats)
+                    {
+                        if (s == null || s.transform == null) continue;
+                        if (heldNow != null && s.placeable != null && s.placeable.gameObject == heldNow) continue;
+                        if (Vector3.Distance(s.transform.position, group.transform.position) < 0.3f) { occ = true; break; }
+                    }
+                }
+                if (occ) continue;
+                Vector3 seatPos = GetSeatTargetPosition(group, table);
+                bool floorOk = false;
+                try { floorOk = WorldGrid.LKBLKCFOEPA(seatPos); } catch { }
+                if (!floorOk) dirs.Add(group.direction);
+            }
+            return dirs;
+        }
+
+        // Returns the minimum push distance (in the opposite of blockedDir) needed for at least one
+        // blocked slot on that side to become a valid floor tile. Approximation: moves the bench
+        // target by delta instead of re-computing build square centres (which don't follow a dry-run
+        // transform move). Tests up to maxSteps half-tiles. Returns 0 if no improvement found.
+        public static float FindWallPushDistance(Table table, Seat[] seats, Direction blockedDir, float stepSize = 0.5f, int maxSteps = 12, bool verbose = false)
+        {
+            if (table == null) return 0f;
+            var groups = SeatingGroupsField.GetValue(table) as SeatingGroup[];
+            if (groups == null) return 0f;
+            GameObject heldNow = null;
+            try { heldNow = SelectObject.GetPlayer(1)?.selectedGameObject; } catch { }
+            Vector3 pushVec = Utils.NGFODNCHPHB(OppositeDirection(blockedDir));
+            for (int step = 1; step <= maxSteps; step++)
+            {
+                float delta = step * stepSize;
+                bool anyUnblocked = false;
+                foreach (var group in groups)
+                {
+                    if (group == null || group.transform == null || group.direction != blockedDir) continue;
+                    bool occ = false;
+                    if (seats != null)
+                    {
+                        foreach (var s in seats)
+                        {
+                            if (s == null || s.transform == null) continue;
+                            if (heldNow != null && s.placeable != null && s.placeable.gameObject == heldNow) continue;
+                            if (Vector3.Distance(s.transform.position, group.transform.position) < 0.3f) { occ = true; break; }
+                        }
+                    }
+                    if (occ) continue;
+                    Vector3 origSeatPos = GetSeatTargetPosition(group, table);
+                    Vector3 newSeatPos = origSeatPos + pushVec * delta;
+                    bool floorOk = false;
+                    try { floorOk = WorldGrid.LKBLKCFOEPA(newSeatPos); } catch { }
+                    if (verbose && step <= 4) MelonLoader.MelonLogger.Msg($"FindWallPush: step={step} delta={delta:F2} orig={origSeatPos} new={newSeatPos} ok={floorOk}");
+                    if (floorOk) { anyUnblocked = true; break; }
+                }
+                if (anyUnblocked) return delta;
+            }
+            return 0f;
+        }
+
+        // Smarter wall fix: finds which direction to push the TABLE so that at least one blocked-empty
+        // bench slot lands on valid floor. Tries all 4 cardinal directions because the blocking wall may
+        // be perpendicular to the slot direction (e.g. a Left-side bench blocked by the SOUTH wall needs
+        // the table pushed NORTH/Up, not pushed Right). Returns (Direction.Up, 0f) if nothing found.
+        public static (Direction pushDir, float pushDist) FindWallFix(Table table, Seat[] seats, float stepSize = 0.5f, int maxSteps = 16)
+        {
+            if (table == null) return (Direction.Up, 0f);
+            var groups = SeatingGroupsField.GetValue(table) as SeatingGroup[];
+            if (groups == null) return (Direction.Up, 0f);
+            GameObject heldNow = null;
+            try { heldNow = SelectObject.GetPlayer(1)?.selectedGameObject; } catch { }
+            var blockedPos = new System.Collections.Generic.List<Vector3>();
+            foreach (var group in groups)
+            {
+                if (group == null || group.transform == null) continue;
+                bool occ = false;
+                if (seats != null)
+                {
+                    foreach (var s in seats)
+                    {
+                        if (s == null || s.transform == null) continue;
+                        if (heldNow != null && s.placeable != null && s.placeable.gameObject == heldNow) continue;
+                        if (Vector3.Distance(s.transform.position, group.transform.position) < 0.3f) { occ = true; break; }
+                    }
+                }
+                if (occ) continue;
+                Vector3 seatPos = GetSeatTargetPosition(group, table);
+                bool floorOk = false;
+                try { floorOk = WorldGrid.LKBLKCFOEPA(seatPos); } catch { }
+                if (!floorOk) blockedPos.Add(seatPos);
+            }
+            if (blockedPos.Count == 0) return (Direction.Up, 0f);
+            Direction[] tryDirs = { Direction.Right, Direction.Left, Direction.Up, Direction.Down };
+            foreach (var pushDir in tryDirs)
+            {
+                Vector3 pushVec = Utils.NGFODNCHPHB(pushDir); pushVec.z = 0f;
+                for (int step = 1; step <= maxSteps; step++)
+                {
+                    float delta = step * stepSize;
+                    bool anyUnblocked = false;
+                    foreach (var origPos in blockedPos)
+                    {
+                        Vector3 newPos = origPos + pushVec * delta;
+                        bool floorOk = false;
+                        try { floorOk = WorldGrid.LKBLKCFOEPA(newPos); } catch { }
+                        if (floorOk) { anyUnblocked = true; break; }
+                    }
+                    if (anyUnblocked) return (pushDir, delta);
+                }
+            }
+            return (Direction.Up, 0f);
+        }
+
+        public static string DirectionPT(Direction d)
+        {
+            switch (d)
+            {
+                case Direction.Left: return "esquerda";
+                case Direction.Right: return "direita";
+                case Direction.Up: return "cima";
+                case Direction.Down: return "baixo";
+                default: return d.ToString();
+            }
+        }
+
+        public static Direction OppositeDirection(Direction d)
+        {
+            switch (d)
+            {
+                case Direction.Left: return Direction.Right;
+                case Direction.Right: return Direction.Left;
+                case Direction.Up: return Direction.Down;
+                case Direction.Down: return Direction.Up;
+                default: return d;
+            }
         }
 
         // Shared by BuildTargetList (nav list) and HandleSeatSlotAnnouncement (proximity

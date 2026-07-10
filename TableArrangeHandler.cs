@@ -22,9 +22,6 @@ namespace TravellersRestAccess
     /// </summary>
     public class TableArrangeHandler
     {
-        private static readonly System.Reflection.FieldInfo SeatingGroupsField =
-            AccessTools.Field(typeof(Table), "seatingGroups");
-
         // Same tavern gate the drink handler uses (the player's own tavern).
         private static bool InTavern()
         {
@@ -71,10 +68,9 @@ namespace TravellersRestAccess
             }
 
             // Step 2: report the seating state. "bloqueado" now means ONLY a truly-blocked EMPTY slot
-            // (empty + no floor, e.g. against a wall) - NOT an occupied slot. CountBlockedSeatSlots
-            // counted every occupied slot as blocked (a bench makes the tile read "no floor"), which
-            // falsely reported "2 mesas com vagas bloqueadas" when everything was actually seated.
+            // (empty + no floor, e.g. against a wall) - NOT an occupied slot.
             int tableCount = 0, blockedSlotTables = 0, totalSlots = 0, blockedSlots = 0, occupiedSlots = 0, freeSlots = 0;
+            var tableBlockHints = new List<string>(); // per-table spoken hints for blocked sides
             foreach (var table in tables)
             {
                 if (table == null) continue;
@@ -86,9 +82,6 @@ namespace TravellersRestAccess
                 freeSlots += tFreeUsable;
                 if (tFreeBlocked > 0) blockedSlotTables++;
 
-                // Info-gathering (user: "vá juntando infos" pra montar a avaliação inteligente e o
-                // guia manual): distance to the NEAREST other table - tells us how crowded/spread the
-                // layout is, which is exactly what drives table-spreading + manual positioning advice.
                 float nearestTableGap = float.MaxValue; Table nearestOther = null;
                 foreach (var o in tables)
                 {
@@ -102,6 +95,24 @@ namespace TravellersRestAccess
                     $"TableArrange: mesa {WorldNavigationHandler.GetTableNumber(table)} pos={table.transform.position} " +
                     $"slots={total} ocupados={tOccupied} livres={tFreeUsable} bloqueadosVazios={tFreeBlocked} " +
                     $"valida={SafeValid(table)} vizinhaMaisPerto={gapStr}");
+
+                if (tFreeBlocked > 0)
+                {
+                    int tableNum = WorldNavigationHandler.GetTableNumber(table);
+                    var (fixDir, fixDist) = WorldNavigationHandler.FindWallFix(table, seats);
+                    if (fixDist > 0f)
+                    {
+                        string wallSidePT = WorldNavigationHandler.DirectionPT(WorldNavigationHandler.OppositeDirection(fixDir));
+                        string pushPT = WorldNavigationHandler.DirectionPT(fixDir);
+                        tableBlockHints.Add($"Mesa {tableNum}: {tFreeBlocked} vaga(s) bloqueada(s), mova a mesa pra {pushPT}");
+                        MelonLoader.MelonLogger.Msg($"TableArrange: mesa {tableNum} {tFreeBlocked} bloqueadas, fix={pushPT} dist={fixDist:F2} (parede={wallSidePT})");
+                    }
+                    else
+                    {
+                        tableBlockHints.Add($"Mesa {tableNum}: {tFreeBlocked} vaga(s) bloqueada(s) (sem espaço pra mover)");
+                        MelonLoader.MelonLogger.Msg($"TableArrange: mesa {tableNum} {tFreeBlocked} bloqueadas, sem fix encontrado");
+                    }
+                }
             }
 
             int looseBenches = 0;
@@ -126,7 +137,6 @@ namespace TravellersRestAccess
             string msg;
             if (looseBenches == 0 && blockedSlots == 0)
             {
-                // Everything seated and no wall-blocked empty slot - the good state.
                 msg = $"Tudo organizado. {tableCount} mesas, {occupiedSlots} bancos assentados, {freeSlots} vagas livres.";
             }
             else
@@ -135,8 +145,11 @@ namespace TravellersRestAccess
                 if (associatedNow > 0) msg += $", {associatedNow} agora";
                 if (looseBenches > 0) msg += $", {looseBenches} bancos soltos";
                 msg += $", {freeSlots} vagas livres";
-                if (blockedSlots > 0) msg += $", {blockedSlots} vagas bloqueadas por parede";
+                if (blockedSlots > 0) msg += $", {blockedSlots} vagas bloqueadas";
                 msg += ".";
+                // Per-table direction hints tell the user which way to move each table.
+                if (tableBlockHints.Count > 0)
+                    msg += " " + string.Join(". ", tableBlockHints) + ".";
             }
             ScreenReader.Say(msg, interrupt: true);
         }

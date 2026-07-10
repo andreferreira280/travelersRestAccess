@@ -153,6 +153,27 @@ namespace TravellersRestAccess
                 Seat seatBeforeDeselect = WorldNavigationHandler.FindSeatForPlaceable(beingPlaced);
                 if (seatBeforeDeselect != null)
                 {
+                    // Re-pin bench and seat before calling GetNeighbourTable. By the time this
+                    // deferred handler fires, the game's WhileSelected has drifted the bench off
+                    // the snap target (confirmed in log: intended y=906.75 but arrived y=906.98).
+                    // GetNeighbourTable searches from the seat's position in its facing direction -
+                    // even 0.5u of drift can push it out of association range (bench id=-677764,
+                    // 2nd attempt: correct target=(14.75,905.75), same assoc position, still
+                    // associou=False because the bench had drifted by the time this ran).
+                    if (_heldIntendedPosition.HasValue)
+                    {
+                        Vector3 pinPos = _heldIntendedPosition.Value;
+                        var pp = beingPlaced.GetComponent<Placeable>();
+                        if (pp != null)
+                        {
+                            CursorManager.SetCursorPositionFromWorld(1, pinPos);
+                            pp.SetMouseOffset(Vector3.zero);
+                            pp.SetPosition(1, pp.attachedToPlayer, pp.snapToGrid, true);
+                        }
+                        beingPlaced.transform.position = pinPos;
+                        seatBeforeDeselect.transform.position = pinPos;
+                        Physics2D.SyncTransforms();
+                    }
                     seatBeforeDeselect.GetNeighbourTableAround();
                     seatBeforeDeselect.GetNeighbourTable();
                     if (Main.DebugMode)
@@ -1202,15 +1223,23 @@ namespace TravellersRestAccess
         // Placeable AND the independent Seat transform onto it, and arm the deferred snap-deselect
         // (top of Update) which then runs GetNeighbourTable + the settle-retry. See the original
         // round-71..99 comments there for the why of each step.
-        private void ArmSeatSnap(GameObject beingPlaced, Seat seat, SeatingGroup slot, Table ownerTable)
+        // forcedPosition: if provided (by DriveAutoArrange), skip FindNearbyValidPlacement and use
+        // the pre-verified associating position directly. FindAssociatingPlacement confirms the
+        // position before pickup; ArmSeatSnap re-running FindNearbyValidPlacement after SelectPlaceable
+        // can land on a DIFFERENT valid tile that doesn't associate (bench id=-677764, 1st attempt:
+        // assoc=(10.75,906.75) but snap ended up at (10.75,906.00) -> associou=False).
+        private void ArmSeatSnap(GameObject beingPlaced, Seat seat, SeatingGroup slot, Table ownerTable, Vector3? forcedPosition = null)
         {
-            Vector3 targetPos = WorldNavigationHandler.GetSeatTargetPosition(slot, ownerTable);
+            Vector3 targetPos = forcedPosition ?? WorldNavigationHandler.GetSeatTargetPosition(slot, ownerTable);
             var placeable = beingPlaced.GetComponent<Placeable>();
             if (placeable != null)
             {
                 placeable.SetDirection(Utils.ABNPPDOGEPM(slot.direction), false);
-                var validPos = WorldNavigationHandler.FindNearbyValidPlacement(placeable, targetPos, TileSize * 2f, seat);
-                if (validPos.HasValue) targetPos = validPos.Value;
+                if (!forcedPosition.HasValue)
+                {
+                    var validPos = WorldNavigationHandler.FindNearbyValidPlacement(placeable, targetPos, TileSize * 2f, seat);
+                    if (validPos.HasValue) targetPos = validPos.Value;
+                }
                 CursorManager.SetCursorPositionFromWorld(1, targetPos);
                 placeable.SetMouseOffset(Vector3.zero);
                 placeable.SetPosition(1, placeable.attachedToPlayer, placeable.snapToGrid, true);
@@ -1313,6 +1342,7 @@ namespace TravellersRestAccess
             if (bench == null) return;
 
             Seat seat = WorldNavigationHandler.FindSeatForPlaceable(bench.gameObject);
+            WorldNavigationHandler.InvalidateStaticSceneCache(); // ensure tucked seats from previous bench are seen as occupied
             var slots = WorldNavigationHandler.GetAllEmptySlots(bench.transform.position, AutoArrangeSlotRadius);
             if (seat == null || slots.Count == 0)
             {
@@ -1358,7 +1388,7 @@ namespace TravellersRestAccess
             MelonLoader.MelonLogger.Msg(
                 $"AutoArrange: movendo banco \"{bench.gameObject.name}\" (id={bench.GetInstanceID()}) de {bench.transform.position} " +
                 $"-> mesa {WorldNavigationHandler.GetTableNumber(table)} vaga {WorldNavigationHandler.GetSlotNumber(slot)} assoc={assoc.Value}");
-            ArmSeatSnap(bench.gameObject, seat, slot, table);
+            ArmSeatSnap(bench.gameObject, seat, slot, table, assoc.Value);
             _autoLast = bench;
         }
 
@@ -1423,7 +1453,52 @@ namespace TravellersRestAccess
             }
             if (chosen == null)
             {
-                ScreenReader.Say("As mesas já estão afastadas o bastante.", interrupt: true);
+                // No inter-table crowding. Check for wall-blocked slots and push the nearest table
+                // away from the wall that is causing the block. FindWallFix tries all 4 directions
+                // because the wall may be perpendicular to the slot (e.g. south wall blocks a
+                // Left-direction bench - only pushing Up/north fixes it, not pushing Right).
+                Seat[] allSeats = null;
+                try { allSeats = Object.FindObjectsByType<Seat>(FindObjectsSortMode.None); } catch { }
+                Table wallTable = null; Direction wallPushDir = Direction.Up; float wallTableDist = float.MaxValue; float wallPushDist = 0f;
+                foreach (var t in tables)
+                {
+                    if (t == null || t.placeable == null) continue;
+                    var (fixDir, fixDist) = WorldNavigationHandler.FindWallFix(t, allSeats);
+                    MelonLoader.MelonLogger.Msg($"TableSpread: wall-fix mesa {WorldNavigationHandler.GetTableNumber(t)} pos={t.transform.position} pushDir={fixDir} dist={fixDist:F2}");
+                    if (fixDist <= 0f) continue;
+                    float dp = Vector3.Distance(playerPos, t.transform.position);
+                    if (dp < wallTableDist) { wallTableDist = dp; wallTable = t; wallPushDir = fixDir; wallPushDist = fixDist; }
+                }
+                if (wallTable == null)
+                {
+                    ScreenReader.Say("As mesas já estão bem posicionadas.", interrupt: true);
+                    return true;
+                }
+                Direction wallSide = WorldNavigationHandler.OppositeDirection(wallPushDir);
+                Vector3 pushVec = Utils.NGFODNCHPHB(wallPushDir); pushVec.z = 0f;
+                var wallPlaceable = wallTable.placeable;
+                Vector3 wallOrig = wallPlaceable.transform.position;
+                Vector3 wallTarget = wallOrig + pushVec * wallPushDist;
+                wallPlaceable.transform.position = wallTarget; Physics2D.SyncTransforms();
+                var wallValid = WorldNavigationHandler.FindNearestValidPosition(wallPlaceable, 3f);
+                wallPlaceable.transform.position = wallOrig; Physics2D.SyncTransforms();
+                Vector3 wallFinal = wallValid ?? wallTarget;
+                if (!selectObj.SelectPlaceable(wallPlaceable))
+                {
+                    ScreenReader.Say("Não consegui pegar a mesa.", interrupt: true);
+                    return true;
+                }
+                wallPlaceable.SetMouseOffset(Vector3.zero);
+                wallPlaceable.RemoveFromSurface(false);
+                _tableSpreadObj = wallPlaceable.gameObject;
+                _tableSpreadOrig = wallOrig;
+                int wallNum = WorldNavigationHandler.GetTableNumber(wallTable);
+                MelonLoader.MelonLogger.Msg(
+                    $"TableSpread: parede - mesa {wallNum} de {wallOrig} -> {wallFinal} (pushDir={WorldNavigationHandler.DirectionPT(wallPushDir)} dist={wallPushDist:F2})");
+                SnapAndConfirm(selectObj, wallPlaceable.gameObject, wallPlaceable, wallFinal, null, "tableSpread");
+                ScreenReader.Say(
+                    $"Mesa {wallNum}: afastando da parede {WorldNavigationHandler.DirectionPT(wallSide)} pra {WorldNavigationHandler.DirectionPT(wallPushDir)}.",
+                    interrupt: true);
                 return true;
             }
 
@@ -1435,9 +1510,6 @@ namespace TravellersRestAccess
 
             var placeable = chosen.placeable;
             Vector3 origPos = placeable.transform.position;
-            // Snap target to the nearest game-valid table position if one is found (best effort;
-            // tables read invalid in place so this may return null - then use the raw pushed target
-            // and let the settle-retry + safety-net decide).
             placeable.transform.position = target; Physics2D.SyncTransforms();
             var valid = WorldNavigationHandler.FindNearestValidPosition(placeable, 3f);
             placeable.transform.position = origPos; Physics2D.SyncTransforms();
