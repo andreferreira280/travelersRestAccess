@@ -96,10 +96,22 @@ namespace TravellersRestAccess
                 occupiedSlots += tOccupied;
                 freeSlots += tFree;
 
+                // Info-gathering (user: "vá juntando infos" pra montar a avaliação inteligente e o
+                // guia manual): distance to the NEAREST other table - tells us how crowded/spread the
+                // layout is, which is exactly what drives table-spreading + manual positioning advice.
+                float nearestTableGap = float.MaxValue; Table nearestOther = null;
+                foreach (var o in tables)
+                {
+                    if (o == null || o == table) continue;
+                    float d = Vector3.Distance(table.transform.position, o.transform.position);
+                    if (d < nearestTableGap) { nearestTableGap = d; nearestOther = o; }
+                }
+                string gapStr = nearestOther != null ? $"{nearestTableGap:F2} (mesa {WorldNavigationHandler.GetTableNumber(nearestOther)})" : "n/a";
+
                 MelonLoader.MelonLogger.Msg(
                     $"TableArrange: mesa {WorldNavigationHandler.GetTableNumber(table)} pos={table.transform.position} " +
                     $"slots={total} bloqueados={blocked} ocupados={tOccupied} livres={tFree} " +
-                    $"valida={SafeValid(table)}");
+                    $"valida={SafeValid(table)} vizinhaMaisPerto={gapStr}");
             }
 
             int looseBenches = 0;

@@ -1378,6 +1378,10 @@ namespace TravellersRestAccess
             bool alt = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
             if (!alt || !Input.GetKeyDown(KeyCode.T)) return false;
 
+            // Entry marker: if this line is absent from the log after an Alt+T, the running game is on
+            // an OLD DLL (MelonLoader loads the mod at game start - a rebuild needs a game restart).
+            MelonLoader.MelonLogger.Msg("TableSpread: Alt+T recebido");
+
             if (_autoActive || _tableSpreadObj != null)
             {
                 ScreenReader.Say("Espere terminar o movimento atual.", interrupt: true);
