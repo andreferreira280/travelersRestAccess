@@ -73,6 +73,8 @@ Not used anywhere in decompiled code - safe to claim for accessibility mod short
 
 **Reminder:** because gameplay actions go through Rewired and are player-remappable, always re ‑verify a specific key isn't currently bound before relying on it being silent; the list above reflects hardcoded `KeyCode` usage found in source, not the full remappable action set.
 
+**Modifier combos do NOT shield a letter (confirmed 2026-07-09):** Rewired ignores modifiers, so `Alt+<letter>` ALSO triggers the game's binding for that letter (e.g. `Alt+T` moved a table AND opened the Skills menu — `T` = skills). The mod cannot consume a game key. For any NEW shortcut, prefer **F-keys/Numpad** (never game-bound). Current mod bindings: `Alt+M` = arrange benches (M empirically silent), `F7` = spread tables (moved off `Alt+T`), `F3/F4/F5` = drink-serving/reputation.
+
 ---
 
 ## 4. UI System

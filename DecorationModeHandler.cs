@@ -1362,25 +1362,28 @@ namespace TravellersRestAccess
             _autoLast = bench;
         }
 
-        // Alt+T inside decoration mode = spread the TABLES apart (user-endorsed "afastar as mesas
+        // F7 inside decoration mode = spread the TABLES apart (user-endorsed "afastar as mesas
         // primeiro"), one table per press. Picks the table nearest the player that sits closer than
         // MinTableGap to another table, and pushes it away from that neighbour to open room for benches
         // on the crowded inner side. Reuses the proven SelectPlaceable + SnapAndConfirm settle flow.
         // SAFETY NET: tables read valida=False even in place, so a move can be refused - if the settle
         // gives up (table left held), DriveTableSpread restores it to its original spot and deselects,
         // so a table is never left floating. One-per-press + full logging so it's a safe probe first.
+        //
+        // Key note: this used to be Alt+T, but T is the game's SKILLS binding (Rewired, remappable) -
+        // Alt+T moved the table AND opened skills (the mod can't consume a game key). F-keys are the
+        // documented safe keys (never game-bound), so table-spread is F7. See game-api.md "Safe Keys".
         private const float MinTableGap = 4.5f;
         private GameObject _tableSpreadObj;
         private Vector3 _tableSpreadOrig;
 
         public bool HandleTableSpreadKey(SelectObject selectObj)
         {
-            bool alt = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
-            if (!alt || !Input.GetKeyDown(KeyCode.T)) return false;
+            if (!Input.GetKeyDown(KeyCode.F7)) return false;
 
-            // Entry marker: if this line is absent from the log after an Alt+T, the running game is on
+            // Entry marker: if this line is absent from the log after an F7, the running game is on
             // an OLD DLL (MelonLoader loads the mod at game start - a rebuild needs a game restart).
-            MelonLoader.MelonLogger.Msg("TableSpread: Alt+T recebido");
+            MelonLoader.MelonLogger.Msg("TableSpread: F7 recebido");
 
             if (_autoActive || _tableSpreadObj != null)
             {
