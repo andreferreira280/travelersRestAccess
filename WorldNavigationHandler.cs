@@ -55,6 +55,7 @@ namespace TravellersRestAccess
             new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase)
         {
             { "Amos", "taverna: equipamentos de cozinha e bebida, móveis, fermento, ingredientes e projetos" },
+            { "Persa", "loja de animais: gatos e animais de estimação" },
             { "Woody", "carpinteiro: madeira, móveis de madeira, baús, máquinas de carpintaria e projetos" },
             { "Petra", "ferreiro interno: projetos, bancadas e máquinas de metal e equipamentos de ferraria" },
             { "Hallmund", "ferreiro externo: ferramentas, melhorias de ferramentas e equipamentos de mineração" },
@@ -96,12 +97,15 @@ namespace TravellersRestAccess
         // buildings' entrances (Ferraria/Serraria) without pulling in other maps.
         private const float CityWideDoorRadius = 600f;
 
-        // The city and every sub-area reached from it (their entrance passages should all be listed).
+        // Only the OPEN, walkable city itself gets the city-wide door radius. The city's inner
+        // buildings (Blacksmith/Sawmill/PetShop/Bathhouse/CityTavern) are separate interior rooms:
+        // from inside them the 600-unit radius reached far, unrelated TravelZones (camp/beach/pirate
+        // cave) that don't even show in the open city (user: "no ferreiro aparecem varias saidas pra
+        // outros lugares... essas saidas nem dentro da cidade foram mostradas"). Inside an interior we
+        // fall back to the normal nearby radius, so only that room's own exit shows.
         private static bool IsCityLocation(Location loc)
         {
-            return loc == Location.City || loc == Location.CityOutside || loc == Location.CityTavern
-                || loc == Location.Sawmill || loc == Location.Blacksmith || loc == Location.PetShop
-                || loc == Location.Bathhouse || loc == Location.BathhouseInterior;
+            return loc == Location.City || loc == Location.CityOutside;
         }
 
         private Location? _lastLocation;
@@ -3035,6 +3039,11 @@ namespace TravellersRestAccess
                 // (user: "só deve ser rastreado na categoria se estiver dentro da serraria/forja").
                 if (npcName == "Woody" && playerLocation != Location.Sawmill) continue;
                 if (npcName == "Petra" && playerLocation != Location.Blacksmith) continue;
+                // Amos (city-tavern trader) and Persa (petshop trader) likewise live INSIDE their
+                // building - only track them there, or from other city spots they showed with the
+                // wrong/looping routes (Amos was appearing inside the blacksmith).
+                if (npcName == "Amos" && playerLocation != Location.CityTavern) continue;
+                if (npcName == "Persa" && playerLocation != Location.PetShop) continue;
                 bool isMerchant = MerchantWares.TryGetValue(npcName, out var wares);
                 // Merchants get a WIDER radius than normal NPCs so all merchants of the current AREA
                 // show together (city merchants in the city, Holly/Bob near the farm) - but NOT the
@@ -3044,9 +3053,19 @@ namespace TravellersRestAccess
                 if (Vector3.Distance(playerPos, npc.transform.position) > radius) continue;
                 // Merchants go in their OWN "Comerciantes" category (user request) with what they sell.
                 if (isMerchant)
+                {
                     list.Add(($"{npcName}, {wares}", GetApproachPosition(npc.gameObject, playerPos), "Comerciantes"));
+                }
                 else
-                    list.Add((npcName, GetApproachPosition(npc.gameObject, playerPos), "NPCs"));
+                {
+                    // The petshop cat goes under "Pendentes" (user request), but ONLY in the petshop
+                    // ("só na área que ele se encontra") - elsewhere any cat stays a plain NPC.
+                    string npcCategory = "NPCs";
+                    if (playerLocation == Location.PetShop
+                        && rawNpc.IndexOf("Cat", System.StringComparison.OrdinalIgnoreCase) >= 0)
+                        npcCategory = "Pendentes";
+                    list.Add((npcName, GetApproachPosition(npc.gameObject, playerPos), npcCategory));
+                }
             }
 
             // User's explicit request: all items nearby too, same "by proximity" rule as
