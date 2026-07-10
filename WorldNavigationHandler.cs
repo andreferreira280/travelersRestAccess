@@ -3058,13 +3058,7 @@ namespace TravellersRestAccess
                 }
                 else
                 {
-                    // The petshop cat goes under "Pendentes" (user request), but ONLY in the petshop
-                    // ("só na área que ele se encontra") - elsewhere any cat stays a plain NPC.
-                    string npcCategory = "NPCs";
-                    if (playerLocation == Location.PetShop
-                        && rawNpc.IndexOf("Cat", System.StringComparison.OrdinalIgnoreCase) >= 0)
-                        npcCategory = "Pendentes";
-                    list.Add((npcName, GetApproachPosition(npc.gameObject, playerPos), npcCategory));
+                    list.Add((npcName, GetApproachPosition(npc.gameObject, playerPos), "NPCs"));
                 }
             }
 
