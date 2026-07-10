@@ -1310,23 +1310,38 @@ namespace TravellersRestAccess
             _autoQueue.RemoveAt(0);
             if (bench == null) return;
 
-            Table table;
-            var slot = WorldNavigationHandler.FindNearestEmptySlot(bench.transform.position, AutoArrangeSlotRadius, out table);
             Seat seat = WorldNavigationHandler.FindSeatForPlaceable(bench.gameObject);
-            if (slot == null || seat == null)
+            var slots = WorldNavigationHandler.GetAllEmptySlots(bench.transform.position, AutoArrangeSlotRadius);
+            if (seat == null || slots.Count == 0)
             {
                 _autoSkipped++;
-                MelonLoader.MelonLogger.Msg($"AutoArrange: banco \"{bench.gameObject.name}\" (id={bench.GetInstanceID()}) sem vaga/assento -> pulado");
+                MelonLoader.MelonLogger.Msg($"AutoArrange: banco \"{bench.gameObject.name}\" (id={bench.GetInstanceID()}) sem vaga/assento (vagas={slots.Count}) -> pulado");
                 return;
             }
 
-            // Only move it if there is a spot that BOTH validates AND associates - otherwise leave it.
-            Vector3 target = WorldNavigationHandler.GetSeatTargetPosition(slot, table);
-            var assoc = WorldNavigationHandler.FindAssociatingPlacement(bench, target, TileSize * 2f, seat);
+            // Try EVERY free slot (nearest first), not just the closest - a big bench that can't fit
+            // the crowded middle slot may still associate on a less crowded side. Only move it if some
+            // slot has a spot that BOTH validates AND associates; otherwise leave it untouched.
+            Table table = null;
+            SeatingGroup slot = null;
+            Vector3? assoc = null;
+            // GetNeighbourTable (inside FindAssociatingPlacement) searches in whatever direction the
+            // bench currently FACES - so the bench must be turned toward the table BEFORE testing, or
+            // a loose bench facing the wrong way always reads "nao associa". Face it the same way
+            // ArmSeatSnap will (opposite the slot's side = toward the table). Restore facing if none fit.
+            Direction origDir = bench.GetDirection();
+            foreach (var cand in slots)
+            {
+                bench.SetDirection(Utils.ABNPPDOGEPM(cand.slot.direction), false);
+                Vector3 target = WorldNavigationHandler.GetSeatTargetPosition(cand.slot, cand.table);
+                var a = WorldNavigationHandler.FindAssociatingPlacement(bench, target, TileSize * 2f, seat);
+                if (a.HasValue) { table = cand.table; slot = cand.slot; assoc = a; break; }
+            }
             if (!assoc.HasValue)
             {
+                bench.SetDirection(origDir, false);
                 _autoSkipped++;
-                MelonLoader.MelonLogger.Msg($"AutoArrange: banco \"{bench.gameObject.name}\" (id={bench.GetInstanceID()}) nao associa na vaga {WorldNavigationHandler.GetSlotNumber(slot)} da mesa {WorldNavigationHandler.GetTableNumber(table)} -> deixado (falta espaco)");
+                MelonLoader.MelonLogger.Msg($"AutoArrange: banco \"{bench.gameObject.name}\" (id={bench.GetInstanceID()}) nao associa em NENHUMA das {slots.Count} vagas livres -> deixado (falta espaco)");
                 return;
             }
 

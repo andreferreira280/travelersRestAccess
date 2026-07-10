@@ -4034,6 +4034,41 @@ namespace TravellersRestAccess
             _staticCachedSeats = FindAll<Seat>();
         }
 
+        // All empty seat slots across every table, nearest-first to `position`. Same emptiness test
+        // as FindNearestEmptySlot (no non-held Seat within 0.3u). Used by the Alt+M auto-arranger to
+        // try EVERY free slot for a bench (not just the closest), so a big bench that can't fit the
+        // nearest/crowded slot still gets a chance on a less crowded side/table.
+        public static System.Collections.Generic.List<(SeatingGroup slot, Table table)> GetAllEmptySlots(Vector3 position, float maxDistance)
+        {
+            RefreshStaticSceneCache();
+            GameObject heldNow = SelectObject.GetPlayer(1)?.selectedGameObject;
+            var result = new System.Collections.Generic.List<(SeatingGroup slot, Table table, float dist)>();
+            foreach (var table in _staticCachedTables)
+            {
+                if (table == null) continue;
+                var groups = SeatingGroupsField.GetValue(table) as SeatingGroup[];
+                if (groups == null) continue;
+                foreach (var group in groups)
+                {
+                    if (group == null || group.transform == null) continue;
+                    float dist = Vector3.Distance(position, group.transform.position);
+                    if (dist > maxDistance) continue;
+                    bool occupied = false;
+                    foreach (var seat in _staticCachedSeats)
+                    {
+                        if (seat == null) continue;
+                        if (seat.placeable != null && seat.placeable.gameObject == heldNow) continue;
+                        if (Vector3.Distance(seat.transform.position, group.transform.position) < 0.3f) { occupied = true; break; }
+                    }
+                    if (!occupied) result.Add((group, table, dist));
+                }
+            }
+            result.Sort((a, b) => a.dist.CompareTo(b.dist));
+            var slots = new System.Collections.Generic.List<(SeatingGroup slot, Table table)>();
+            foreach (var r in result) slots.Add((r.slot, r.table));
+            return slots;
+        }
+
         public static SeatingGroup FindNearestEmptySlot(Vector3 position, float maxDistance, out Table ownerTable)
         {
             RefreshStaticSceneCache();
