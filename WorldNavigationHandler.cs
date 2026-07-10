@@ -4233,6 +4233,42 @@ namespace TravellersRestAccess
             return (total, blocked);
         }
 
+        // Like CountBlockedSeatSlots but for a POPULATED table: a slot with a bench already on it reads
+        // "no floor" from LKBLKCFOEPA (the bench occupies the tile), so CountBlockedSeatSlots wrongly
+        // counts every OCCUPIED slot as "blocked". This separates the three real states so the arrange
+        // report is honest: occupied (has a bench), freeUsable (empty, floor OK), freeBlocked (empty,
+        // no floor - the only real "blocked by wall" case the user cares about). Occupancy = a non-held
+        // Seat within 0.3u of the slot marker (same test the rest of the arranger uses).
+        public static (int total, int occupied, int freeUsable, int freeBlocked) CountSlotStates(Table table, Seat[] seats)
+        {
+            if (table == null) return (0, 0, 0, 0);
+            var groups = SeatingGroupsField.GetValue(table) as SeatingGroup[];
+            if (groups == null) return (0, 0, 0, 0);
+            GameObject heldNow = SelectObject.GetPlayer(1)?.selectedGameObject;
+            int total = 0, occupied = 0, freeUsable = 0, freeBlocked = 0;
+            foreach (var group in groups)
+            {
+                if (group == null || group.transform == null) continue;
+                total++;
+                bool occ = false;
+                if (seats != null)
+                {
+                    foreach (var s in seats)
+                    {
+                        if (s == null || s.transform == null) continue;
+                        if (s.placeable != null && s.placeable.gameObject == heldNow) continue;
+                        if (Vector3.Distance(s.transform.position, group.transform.position) < 0.3f) { occ = true; break; }
+                    }
+                }
+                if (occ) { occupied++; continue; }
+                Vector3 seatPos = GetSeatTargetPosition(group, table);
+                bool floorOk = false;
+                try { floorOk = WorldGrid.LKBLKCFOEPA(seatPos); } catch { }
+                if (floorOk) freeUsable++; else freeBlocked++;
+            }
+            return (total, occupied, freeUsable, freeBlocked);
+        }
+
         // Shared by BuildTargetList (nav list) and HandleSeatSlotAnnouncement (proximity
         // speech) - see the "Lugar pra banco" note above for why this reads a private field.
         // Takes the scene-wide table/seat arrays as parameters instead of scanning internally

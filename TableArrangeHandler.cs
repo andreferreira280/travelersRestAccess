@@ -70,31 +70,21 @@ namespace TravellersRestAccess
                 if (!before && seat.table != null) associatedNow++;
             }
 
-            // Step 2: report the seating state.
+            // Step 2: report the seating state. "bloqueado" now means ONLY a truly-blocked EMPTY slot
+            // (empty + no floor, e.g. against a wall) - NOT an occupied slot. CountBlockedSeatSlots
+            // counted every occupied slot as blocked (a bench makes the tile read "no floor"), which
+            // falsely reported "2 mesas com vagas bloqueadas" when everything was actually seated.
             int tableCount = 0, blockedSlotTables = 0, totalSlots = 0, blockedSlots = 0, occupiedSlots = 0, freeSlots = 0;
             foreach (var table in tables)
             {
                 if (table == null) continue;
                 tableCount++;
-                var (total, blocked) = WorldNavigationHandler.CountBlockedSeatSlots(table);
+                var (total, tOccupied, tFreeUsable, tFreeBlocked) = WorldNavigationHandler.CountSlotStates(table, seats);
                 totalSlots += total;
-                blockedSlots += blocked;
-                if (blocked > 0) blockedSlotTables++;
-
-                var groups = SeatingGroupsField.GetValue(table) as SeatingGroup[];
-                int tOccupied = 0, tFree = 0;
-                if (groups != null)
-                {
-                    foreach (var g in groups)
-                    {
-                        if (g == null || g.transform == null) continue;
-                        bool occ = SlotOccupied(g, seats);
-                        if (occ) tOccupied++;
-                        else tFree++;
-                    }
-                }
+                blockedSlots += tFreeBlocked;
                 occupiedSlots += tOccupied;
-                freeSlots += tFree;
+                freeSlots += tFreeUsable;
+                if (tFreeBlocked > 0) blockedSlotTables++;
 
                 // Info-gathering (user: "vá juntando infos" pra montar a avaliação inteligente e o
                 // guia manual): distance to the NEAREST other table - tells us how crowded/spread the
@@ -110,7 +100,7 @@ namespace TravellersRestAccess
 
                 MelonLoader.MelonLogger.Msg(
                     $"TableArrange: mesa {WorldNavigationHandler.GetTableNumber(table)} pos={table.transform.position} " +
-                    $"slots={total} bloqueados={blocked} ocupados={tOccupied} livres={tFree} " +
+                    $"slots={total} ocupados={tOccupied} livres={tFreeUsable} bloqueadosVazios={tFreeBlocked} " +
                     $"valida={SafeValid(table)} vizinhaMaisPerto={gapStr}");
             }
 
@@ -131,28 +121,24 @@ namespace TravellersRestAccess
             MelonLoader.MelonLogger.Msg(
                 $"TableArrange: RESUMO mesas={tableCount} bancos={seats.Length} associadosAgora={associatedNow} " +
                 $"bancosSoltos={looseBenches} slotsTotal={totalSlots} slotsLivres={freeSlots} " +
-                $"slotsOcupados={occupiedSlots} slotsBloqueados={blockedSlots} mesasComVagaBloqueada={blockedSlotTables}");
+                $"slotsOcupados={occupiedSlots} slotsBloqueadosVazios={blockedSlots} mesasComVagaBloqueada={blockedSlotTables}");
 
-            string msg = $"{tableCount} mesas, {seats.Length} bancos. ";
-            if (associatedNow > 0) msg += $"{associatedNow} bancos associados agora. ";
-            msg += $"{looseBenches} bancos soltos, {freeSlots} vagas livres.";
-            if (blockedSlotTables > 0) msg += $" {blockedSlotTables} mesas com vagas bloqueadas.";
-            ScreenReader.Say(msg, interrupt: true);
-        }
-
-        // A slot is occupied if a real (non-held) seat sits within 0.3u of it - the same test
-        // FindNearestEmptySlot/GetEmptySeatSlots use (the game's `occupied` flag is never
-        // maintained, confirmed in WorldNavigationHandler's notes).
-        private static bool SlotOccupied(SeatingGroup slot, Seat[] seats)
-        {
-            GameObject heldNow = SelectObject.GetPlayer(1) != null ? SelectObject.GetPlayer(1).selectedGameObject : null;
-            foreach (var seat in seats)
+            string msg;
+            if (looseBenches == 0 && blockedSlots == 0)
             {
-                if (seat == null || seat.transform == null) continue;
-                if (seat.placeable != null && seat.placeable.gameObject == heldNow) continue;
-                if (Vector3.Distance(seat.transform.position, slot.transform.position) < 0.3f) return true;
+                // Everything seated and no wall-blocked empty slot - the good state.
+                msg = $"Tudo organizado. {tableCount} mesas, {occupiedSlots} bancos assentados, {freeSlots} vagas livres.";
             }
-            return false;
+            else
+            {
+                msg = $"{tableCount} mesas. {occupiedSlots} bancos assentados";
+                if (associatedNow > 0) msg += $", {associatedNow} agora";
+                if (looseBenches > 0) msg += $", {looseBenches} bancos soltos";
+                msg += $", {freeSlots} vagas livres";
+                if (blockedSlots > 0) msg += $", {blockedSlots} vagas bloqueadas por parede";
+                msg += ".";
+            }
+            ScreenReader.Say(msg, interrupt: true);
         }
 
         private static string SafeValid(Table table)
