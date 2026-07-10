@@ -259,10 +259,12 @@ namespace TravellersRestAccess
             var selectObj = SelectObject.GetPlayer(1);
             if (selectObj == null) return;
 
-            // Alt+M: auto-arrange ALL loose benches (queued across frames). While a run is active we
-            // fully own the flow (drive the queue each idle frame); the key only starts a run.
+            // Alt+M: auto-arrange ALL loose benches (queued across frames). Alt+T: spread the tables
+            // apart (one per press). While a run is active we fully own the flow each idle frame.
+            if (_tableSpreadObj != null) { DriveTableSpread(selectObj); return; }
             if (_autoActive) { DriveAutoArrange(selectObj); return; }
             if (HandleAutoArrangeKey(selectObj)) return;
+            if (HandleTableSpreadKey(selectObj)) return;
 
             if (selectObj.selectedGameObject == null)
             {
@@ -1358,6 +1360,126 @@ namespace TravellersRestAccess
                 $"-> mesa {WorldNavigationHandler.GetTableNumber(table)} vaga {WorldNavigationHandler.GetSlotNumber(slot)} assoc={assoc.Value}");
             ArmSeatSnap(bench.gameObject, seat, slot, table);
             _autoLast = bench;
+        }
+
+        // Alt+T inside decoration mode = spread the TABLES apart (user-endorsed "afastar as mesas
+        // primeiro"), one table per press. Picks the table nearest the player that sits closer than
+        // MinTableGap to another table, and pushes it away from that neighbour to open room for benches
+        // on the crowded inner side. Reuses the proven SelectPlaceable + SnapAndConfirm settle flow.
+        // SAFETY NET: tables read valida=False even in place, so a move can be refused - if the settle
+        // gives up (table left held), DriveTableSpread restores it to its original spot and deselects,
+        // so a table is never left floating. One-per-press + full logging so it's a safe probe first.
+        private const float MinTableGap = 4.5f;
+        private GameObject _tableSpreadObj;
+        private Vector3 _tableSpreadOrig;
+
+        public bool HandleTableSpreadKey(SelectObject selectObj)
+        {
+            bool alt = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
+            if (!alt || !Input.GetKeyDown(KeyCode.T)) return false;
+
+            if (_autoActive || _tableSpreadObj != null)
+            {
+                ScreenReader.Say("Espere terminar o movimento atual.", interrupt: true);
+                return true;
+            }
+            if (selectObj.selectedGameObject != null || _pendingSnapDeselect != null || _pendingSettleDeselect != null)
+            {
+                ScreenReader.Say("Espere o item atual assentar.", interrupt: true);
+                return true;
+            }
+
+            Table[] tables;
+            try { tables = Object.FindObjectsByType<Table>(FindObjectsSortMode.None); }
+            catch { return true; }
+            if (tables.Length < 2)
+            {
+                ScreenReader.Say("Precisa de pelo menos duas mesas pra afastar.", interrupt: true);
+                return true;
+            }
+
+            Vector3 playerPos = PlayerController.GetPlayerPosition(1);
+            Table chosen = null, neighbor = null; float chosenPlayerDist = float.MaxValue;
+            foreach (var t in tables)
+            {
+                if (t == null || t.placeable == null) continue;
+                Table n = null; float nd = float.MaxValue;
+                foreach (var o in tables)
+                {
+                    if (o == null || o == t) continue;
+                    float d = Vector3.Distance(t.transform.position, o.transform.position);
+                    if (d < nd) { nd = d; n = o; }
+                }
+                if (n == null || nd >= MinTableGap) continue;
+                float dp = Vector3.Distance(playerPos, t.transform.position);
+                if (dp < chosenPlayerDist) { chosenPlayerDist = dp; chosen = t; neighbor = n; }
+            }
+            if (chosen == null)
+            {
+                ScreenReader.Say("As mesas já estão afastadas o bastante.", interrupt: true);
+                return true;
+            }
+
+            Vector3 dir = chosen.transform.position - neighbor.transform.position; dir.z = 0f;
+            if (dir.sqrMagnitude < 0.01f) dir = Vector3.left;
+            dir = dir.normalized;
+            float gap = Vector3.Distance(chosen.transform.position, neighbor.transform.position);
+            Vector3 target = chosen.transform.position + dir * (MinTableGap - gap);
+
+            var placeable = chosen.placeable;
+            Vector3 origPos = placeable.transform.position;
+            // Snap target to the nearest game-valid table position if one is found (best effort;
+            // tables read invalid in place so this may return null - then use the raw pushed target
+            // and let the settle-retry + safety-net decide).
+            placeable.transform.position = target; Physics2D.SyncTransforms();
+            var valid = WorldNavigationHandler.FindNearestValidPosition(placeable, 3f);
+            placeable.transform.position = origPos; Physics2D.SyncTransforms();
+            Vector3 finalTarget = valid ?? target;
+
+            if (!selectObj.SelectPlaceable(placeable))
+            {
+                ScreenReader.Say("Não consegui pegar a mesa.", interrupt: true);
+                return true;
+            }
+            placeable.SetMouseOffset(Vector3.zero);
+            placeable.RemoveFromSurface(false);
+            _tableSpreadObj = placeable.gameObject;
+            _tableSpreadOrig = origPos;
+            MelonLoader.MelonLogger.Msg(
+                $"TableSpread: movendo mesa {WorldNavigationHandler.GetTableNumber(chosen)} de {origPos} -> {finalTarget} " +
+                $"(gap {gap:F2} -> alvo {MinTableGap}, validSnap={(valid.HasValue ? "s" : "n")})");
+            SnapAndConfirm(selectObj, placeable.gameObject, placeable, finalTarget, null, "tableSpread");
+            ScreenReader.Say($"Afastando mesa {WorldNavigationHandler.GetTableNumber(chosen)}.", interrupt: true);
+            return true;
+        }
+
+        private void DriveTableSpread(SelectObject selectObj)
+        {
+            // Still settling - let the top-of-Update settle block finish.
+            if (_pendingSettleDeselect != null || _pendingSnapDeselect != null) return;
+
+            if (selectObj.selectedGameObject == null)
+            {
+                MelonLoader.MelonLogger.Msg($"TableSpread: mesa assentou pos={(_tableSpreadObj != null ? _tableSpreadObj.transform.position.ToString() : "?")}");
+                _tableSpreadObj = null;
+                return;
+            }
+
+            // Still held with no pending settle -> the move was refused. Restore to the original spot
+            // (which was valid, since the table lived there) and deselect, so nothing is left floating.
+            var p = _tableSpreadObj.GetComponent<Placeable>();
+            if (p != null)
+            {
+                CursorManager.SetCursorPositionFromWorld(1, _tableSpreadOrig);
+                p.SetMouseOffset(Vector3.zero);
+                _tableSpreadObj.transform.position = _tableSpreadOrig;
+                p.SetPosition(1, p.attachedToPlayer, p.snapToGrid, true);
+                Physics2D.SyncTransforms();
+                selectObj.Deselect();
+            }
+            MelonLoader.MelonLogger.Msg($"TableSpread: FALHOU - restaurada pra {_tableSpreadOrig}");
+            ScreenReader.Say("Não deu pra afastar essa mesa, voltei ela pro lugar.", interrupt: true);
+            _tableSpreadObj = null;
         }
 
         // Round 99: snap onto the validated target and Deselect in ONE frame. This replaces the
