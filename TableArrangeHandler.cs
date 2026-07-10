@@ -36,6 +36,10 @@ namespace TravellersRestAccess
         {
             if (anyUiOpen) return;
             if (!InTavern()) return;
+            // Inside decoration mode, Alt+M is the auto-arranger (moves a loose bench onto a slot,
+            // handled by DecorationModeHandler). Outside it, Alt+M here just associates benches
+            // already at tables + reports the layout. Never let both fire the same frame.
+            try { var dm = DecorationMode.GetPlayer(1); if (dm != null && dm.DMBFKFLDDLH) return; } catch { }
             bool alt = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
             if (alt && Input.GetKeyDown(KeyCode.M)) Arrange();
         }

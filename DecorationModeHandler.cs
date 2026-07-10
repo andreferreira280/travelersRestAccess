@@ -259,6 +259,10 @@ namespace TravellersRestAccess
             var selectObj = SelectObject.GetPlayer(1);
             if (selectObj == null) return;
 
+            // Alt+M: auto-arrange the nearest loose bench onto a free slot (one per press). Only acts
+            // when idle; consumes the key so the normal grab/place path below is untouched.
+            if (HandleAutoArrangeKey(selectObj)) return;
+
             if (selectObj.selectedGameObject == null)
             {
                 if (_lastSelectedGameObject != null && Main.DebugMode)
@@ -1092,54 +1096,7 @@ namespace TravellersRestAccess
                 }
                 if (slot != null)
                 {
-                    // Snap the bench exactly onto the slot and face it the direction the slot
-                    // expects (SetDirection - the same public API the native R/rotate key
-                    // calls) instead of confirming whatever position/facing the player happened
-                    // to be holding. Deferred to next frame - see the _pendingSnapDeselect
-                    // handling at the top of Update(). Target position is offset from the
-                    // slot's own marker (see GetSeatTargetPosition) - using the marker directly
-                    // overlapped the table every time (round 71's bug).
-                    Vector3 targetPos = WorldNavigationHandler.GetSeatTargetPosition(slot, ownerTable);
-                    var placeable = beingPlaced.GetComponent<Placeable>();
-                    if (placeable != null)
-                    {
-                        // Round 88: round 87's exact-search-point diagnostic measured the search
-                        // landing 1.77 units away from the real table - and the direction of that
-                        // gap gave away the actual bug. slot.direction is "which side of the table
-                        // this slot is on" (confirmed: a Left slot sat to the table's LEFT in
-                        // world coords) - used directly as the bench's OWN facing, that makes the
-                        // bench face Left too, i.e. AWAY from the table on its right, not toward
-                        // it. Seat.GetNeighbourTable searches 0.5 units in whatever direction the
-                        // Placeable is currently facing, so facing away from the table guarantees
-                        // it searches past empty space instead. Facing the opposite of the slot's
-                        // side - toward the table - is what makes that search land on it.
-                        placeable.SetDirection(Utils.ABNPPDOGEPM(slot.direction), false);
-                        // The computed seat-slot tile is sometimes REFUSED by the game
-                        // (IsObjectInValidLocation(true)=False) even with canBePlaced=True - the 2nd
-                        // bench failed on BOTH table sides. Nudge the target to the nearest tile the
-                        // game actually accepts (facing is set above; validity depends on it).
-                        var validPos = WorldNavigationHandler.FindNearbyValidPlacement(placeable, targetPos, TileSize * 2f, seat);
-                        if (validPos.HasValue) targetPos = validPos.Value;
-                        CursorManager.SetCursorPositionFromWorld(1, targetPos);
-                        placeable.SetMouseOffset(Vector3.zero);
-                        placeable.SetPosition(1, placeable.attachedToPlayer, placeable.snapToGrid, true);
-                    }
-                    else
-                    {
-                        CursorManager.SetCursorPositionFromWorld(1, targetPos);
-                    }
-                    beingPlaced.transform.position = targetPos;
-                    // Round 84: same fix as HandleCursorMovement - Seat is its own independent
-                    // GameObject (confirmed via the diagnostic), never moved by anything done to
-                    // the Placeable's transform. GetNeighbourTable (which runs right after
-                    // Deselect, via _pendingSeatCheck) searches from Seat's own position - has to
-                    // be moved here directly or it'll keep searching from the wrong spot.
-                    seat.transform.position = targetPos;
-                    _heldIntendedPosition = targetPos;
-                    _pendingSnapDeselect = beingPlaced;
-                    _pendingSnapSlot = slot;
-                    if (Main.DebugMode) DebugLogger.LogState($"DecorationMode: snap attempt - target={targetPos} slotPos={slot.transform.position} slotDir={slot.direction} beforePos={beingPlaced.transform.position}");
-                    WorldNavigationHandler.LogBuildSquareHierarchy(seat, beingPlaced);
+                    ArmSeatSnap(beingPlaced, seat, slot, ownerTable);
                     return;
                 }
             }
@@ -1234,6 +1191,100 @@ namespace TravellersRestAccess
 
             bool placed = selectObj.Deselect();
             HandlePlacementResult(placed, beingPlaced, null);
+        }
+
+        // Extracted from HandleConfirmPlacement's seat branch so the auto-arranger (Alt+M) reuses the
+        // EXACT proven bench-snap: face the bench toward the table (SetDirection opposite the slot
+        // side), nudge to the nearest tile the game accepts (FindNearbyValidPlacement), pin the
+        // Placeable AND the independent Seat transform onto it, and arm the deferred snap-deselect
+        // (top of Update) which then runs GetNeighbourTable + the settle-retry. See the original
+        // round-71..99 comments there for the why of each step.
+        private void ArmSeatSnap(GameObject beingPlaced, Seat seat, SeatingGroup slot, Table ownerTable)
+        {
+            Vector3 targetPos = WorldNavigationHandler.GetSeatTargetPosition(slot, ownerTable);
+            var placeable = beingPlaced.GetComponent<Placeable>();
+            if (placeable != null)
+            {
+                placeable.SetDirection(Utils.ABNPPDOGEPM(slot.direction), false);
+                var validPos = WorldNavigationHandler.FindNearbyValidPlacement(placeable, targetPos, TileSize * 2f, seat);
+                if (validPos.HasValue) targetPos = validPos.Value;
+                CursorManager.SetCursorPositionFromWorld(1, targetPos);
+                placeable.SetMouseOffset(Vector3.zero);
+                placeable.SetPosition(1, placeable.attachedToPlayer, placeable.snapToGrid, true);
+            }
+            else
+            {
+                CursorManager.SetCursorPositionFromWorld(1, targetPos);
+            }
+            beingPlaced.transform.position = targetPos;
+            if (seat != null) seat.transform.position = targetPos;
+            _heldIntendedPosition = targetPos;
+            _pendingSnapDeselect = beingPlaced;
+            _pendingSnapSlot = slot;
+            if (Main.DebugMode) DebugLogger.LogState($"DecorationMode: snap attempt - target={targetPos} slotPos={slot.transform.position} slotDir={slot.direction} beforePos={beingPlaced.transform.position}");
+            if (seat != null) WorldNavigationHandler.LogBuildSquareHierarchy(seat, beingPlaced);
+        }
+
+        // Alt+M inside decoration mode = auto-arrange ONE loose bench per press (furniture only
+        // moves in decoration mode - the game's own constraint). Picks the nearest loose bench (a
+        // Seat with no table), grabs it, and snaps it onto the nearest free valid slot via the exact
+        // proven ArmSeatSnap flow, which then associates it (GetNeighbourTable) and settles it.
+        // One-per-press so the blind user can verify each move (log + feel) before the next, and stop
+        // any time. Returns true if it consumed the key. Logged unconditionally so each move is
+        // traceable; also logs the bench's Placeable instance id so multi-seat vs single-seat benches
+        // can be told apart from the log.
+        private const float AutoArrangeSlotRadius = 10f;
+        public bool HandleAutoArrangeKey(SelectObject selectObj)
+        {
+            bool alt = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
+            if (!alt || !(Input.GetKeyDown(KeyCode.M))) return false;
+
+            if (selectObj.selectedGameObject != null || _pendingSnapDeselect != null || _pendingSettleDeselect != null)
+            {
+                ScreenReader.Say("Espere o banco anterior assentar.", interrupt: true);
+                return true;
+            }
+
+            Vector3 playerPos = PlayerController.GetPlayerPosition(1);
+            Seat[] seats;
+            try { seats = Object.FindObjectsByType<Seat>(FindObjectsSortMode.None); }
+            catch { return true; }
+            Placeable bench = null; Seat benchSeat = null; float best = float.MaxValue;
+            foreach (var s in seats)
+            {
+                if (s == null || s.table != null || s.placeable == null) continue;
+                float d = Vector3.Distance(playerPos, s.placeable.transform.position);
+                if (d < best) { best = d; bench = s.placeable; benchSeat = s; }
+            }
+            if (bench == null)
+            {
+                ScreenReader.Say("Nenhum banco solto pra organizar.", interrupt: true);
+                return true;
+            }
+
+            Table table;
+            var slot = WorldNavigationHandler.FindNearestEmptySlot(bench.transform.position, AutoArrangeSlotRadius, out table);
+            if (slot == null)
+            {
+                ScreenReader.Say("Sem vaga livre perto pra esse banco.", interrupt: true);
+                MelonLoader.MelonLogger.Msg($"AutoArrange: banco \"{bench.gameObject.name}\" (id={bench.GetInstanceID()}) sem vaga livre em {AutoArrangeSlotRadius}u de {bench.transform.position}");
+                return true;
+            }
+
+            if (!selectObj.SelectPlaceable(bench))
+            {
+                ScreenReader.Say("Não consegui pegar o banco.", interrupt: true);
+                return true;
+            }
+            bench.SetMouseOffset(Vector3.zero);
+            bench.RemoveFromSurface(false);
+            var seatForSnap = WorldNavigationHandler.FindSeatForPlaceable(bench.gameObject) ?? benchSeat;
+            MelonLoader.MelonLogger.Msg(
+                $"AutoArrange: movendo banco \"{bench.gameObject.name}\" (id={bench.GetInstanceID()}) de {bench.transform.position} " +
+                $"-> mesa {WorldNavigationHandler.GetTableNumber(table)} vaga {WorldNavigationHandler.GetSlotNumber(slot)} slotPos={slot.transform.position}");
+            ArmSeatSnap(bench.gameObject, seatForSnap, slot, table);
+            ScreenReader.Say($"Movendo banco pra mesa {WorldNavigationHandler.GetTableNumber(table)}, vaga {WorldNavigationHandler.GetSlotNumber(slot)}.", interrupt: true);
+            return true;
         }
 
         // Round 99: snap onto the validated target and Deselect in ONE frame. This replaces the
