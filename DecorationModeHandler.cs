@@ -259,8 +259,9 @@ namespace TravellersRestAccess
             var selectObj = SelectObject.GetPlayer(1);
             if (selectObj == null) return;
 
-            // Alt+M: auto-arrange the nearest loose bench onto a free slot (one per press). Only acts
-            // when idle; consumes the key so the normal grab/place path below is untouched.
+            // Alt+M: auto-arrange ALL loose benches (queued across frames). While a run is active we
+            // fully own the flow (drive the queue each idle frame); the key only starts a run.
+            if (_autoActive) { DriveAutoArrange(selectObj); return; }
             if (HandleAutoArrangeKey(selectObj)) return;
 
             if (selectObj.selectedGameObject == null)
@@ -1225,66 +1226,123 @@ namespace TravellersRestAccess
             if (seat != null) WorldNavigationHandler.LogBuildSquareHierarchy(seat, beingPlaced);
         }
 
-        // Alt+M inside decoration mode = auto-arrange ONE loose bench per press (furniture only
-        // moves in decoration mode - the game's own constraint). Picks the nearest loose bench (a
-        // Seat with no table), grabs it, and snaps it onto the nearest free valid slot via the exact
-        // proven ArmSeatSnap flow, which then associates it (GetNeighbourTable) and settles it.
-        // One-per-press so the blind user can verify each move (log + feel) before the next, and stop
-        // any time. Returns true if it consumed the key. Logged unconditionally so each move is
-        // traceable; also logs the bench's Placeable instance id so multi-seat vs single-seat benches
-        // can be told apart from the log.
+        // Alt+M inside decoration mode = auto-arrange ALL loose benches in one press (furniture only
+        // moves in decoration mode - the game's own constraint). The log proved one-per-press fails
+        // for big benches: a "Banco Grande" shoved 0.6u off the slot to find a game-valid tile then
+        // couldn't associate (GetNeighbourTable table=null), and the benches block each other
+        // (user: "um pode bloquear o outro"). So: queue every loose bench and process them across
+        // frames; each moved bench VACATES its old spot, freeing room for the next; and a bench is
+        // ONLY moved if a position exists that BOTH is game-valid AND actually associates
+        // (FindAssociatingPlacement) - otherwise it's left untouched (never scattered into limbo) and
+        // reported as "sem espaço". Everything logged so the result is traceable.
         private const float AutoArrangeSlotRadius = 10f;
+        private bool _autoActive;
+        private readonly System.Collections.Generic.List<Placeable> _autoQueue = new System.Collections.Generic.List<Placeable>();
+        private Placeable _autoLast;
+        private int _autoMoved, _autoSkipped, _autoStart;
+
         public bool HandleAutoArrangeKey(SelectObject selectObj)
         {
             bool alt = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
             if (!alt || !(Input.GetKeyDown(KeyCode.M))) return false;
 
+            if (_autoActive)
+            {
+                ScreenReader.Say("Já estou organizando, espere.", interrupt: true);
+                return true;
+            }
             if (selectObj.selectedGameObject != null || _pendingSnapDeselect != null || _pendingSettleDeselect != null)
             {
-                ScreenReader.Say("Espere o banco anterior assentar.", interrupt: true);
+                ScreenReader.Say("Espere o item atual assentar.", interrupt: true);
                 return true;
             }
 
-            Vector3 playerPos = PlayerController.GetPlayerPosition(1);
+            _autoQueue.Clear();
             Seat[] seats;
             try { seats = Object.FindObjectsByType<Seat>(FindObjectsSortMode.None); }
             catch { return true; }
-            Placeable bench = null; Seat benchSeat = null; float best = float.MaxValue;
+            var seen = new System.Collections.Generic.HashSet<Placeable>();
             foreach (var s in seats)
             {
                 if (s == null || s.table != null || s.placeable == null) continue;
-                float d = Vector3.Distance(playerPos, s.placeable.transform.position);
-                if (d < best) { best = d; bench = s.placeable; benchSeat = s; }
+                if (seen.Add(s.placeable)) _autoQueue.Add(s.placeable);
             }
-            if (bench == null)
+            if (_autoQueue.Count == 0)
             {
                 ScreenReader.Say("Nenhum banco solto pra organizar.", interrupt: true);
                 return true;
             }
+            _autoStart = _autoQueue.Count;
+            _autoMoved = 0; _autoSkipped = 0; _autoLast = null;
+            _autoActive = true;
+            MelonLoader.MelonLogger.Msg($"AutoArrange: INICIO bancosSoltos={_autoStart}");
+            ScreenReader.Say($"Organizando {_autoStart} bancos.", interrupt: true);
+            return true;
+        }
+
+        // Drives the queue: called every frame while _autoActive. Runs only when idle (the top-of-
+        // Update settle blocks own the frames while a bench is settling), so it processes one bench
+        // per settle cycle. Counts the previous bench's result once it has settled.
+        private void DriveAutoArrange(SelectObject selectObj)
+        {
+            if (selectObj.selectedGameObject != null || _pendingSnapDeselect != null || _pendingSettleDeselect != null) return;
+
+            if (_autoLast != null)
+            {
+                Seat s = WorldNavigationHandler.FindSeatForPlaceable(_autoLast.gameObject);
+                bool ok = s != null && s.table != null;
+                if (ok) _autoMoved++; else _autoSkipped++;
+                MelonLoader.MelonLogger.Msg($"AutoArrange: resultado banco id={_autoLast.GetInstanceID()} associou={ok} pos={_autoLast.transform.position}");
+                _autoLast = null;
+            }
+
+            if (_autoQueue.Count == 0)
+            {
+                _autoActive = false;
+                MelonLoader.MelonLogger.Msg($"AutoArrange: FIM movidos={_autoMoved} semEspaco={_autoSkipped} de {_autoStart}");
+                string msg = $"Pronto. {_autoMoved} bancos assentados";
+                if (_autoSkipped > 0) msg += $", {_autoSkipped} sem espaço";
+                ScreenReader.Say(msg + ".", interrupt: true);
+                return;
+            }
+
+            Placeable bench = _autoQueue[0];
+            _autoQueue.RemoveAt(0);
+            if (bench == null) return;
 
             Table table;
             var slot = WorldNavigationHandler.FindNearestEmptySlot(bench.transform.position, AutoArrangeSlotRadius, out table);
-            if (slot == null)
+            Seat seat = WorldNavigationHandler.FindSeatForPlaceable(bench.gameObject);
+            if (slot == null || seat == null)
             {
-                ScreenReader.Say("Sem vaga livre perto pra esse banco.", interrupt: true);
-                MelonLoader.MelonLogger.Msg($"AutoArrange: banco \"{bench.gameObject.name}\" (id={bench.GetInstanceID()}) sem vaga livre em {AutoArrangeSlotRadius}u de {bench.transform.position}");
-                return true;
+                _autoSkipped++;
+                MelonLoader.MelonLogger.Msg($"AutoArrange: banco \"{bench.gameObject.name}\" (id={bench.GetInstanceID()}) sem vaga/assento -> pulado");
+                return;
+            }
+
+            // Only move it if there is a spot that BOTH validates AND associates - otherwise leave it.
+            Vector3 target = WorldNavigationHandler.GetSeatTargetPosition(slot, table);
+            var assoc = WorldNavigationHandler.FindAssociatingPlacement(bench, target, TileSize * 2f, seat);
+            if (!assoc.HasValue)
+            {
+                _autoSkipped++;
+                MelonLoader.MelonLogger.Msg($"AutoArrange: banco \"{bench.gameObject.name}\" (id={bench.GetInstanceID()}) nao associa na vaga {WorldNavigationHandler.GetSlotNumber(slot)} da mesa {WorldNavigationHandler.GetTableNumber(table)} -> deixado (falta espaco)");
+                return;
             }
 
             if (!selectObj.SelectPlaceable(bench))
             {
-                ScreenReader.Say("Não consegui pegar o banco.", interrupt: true);
-                return true;
+                _autoSkipped++;
+                MelonLoader.MelonLogger.Msg($"AutoArrange: nao consegui pegar banco id={bench.GetInstanceID()} -> pulado");
+                return;
             }
             bench.SetMouseOffset(Vector3.zero);
             bench.RemoveFromSurface(false);
-            var seatForSnap = WorldNavigationHandler.FindSeatForPlaceable(bench.gameObject) ?? benchSeat;
             MelonLoader.MelonLogger.Msg(
                 $"AutoArrange: movendo banco \"{bench.gameObject.name}\" (id={bench.GetInstanceID()}) de {bench.transform.position} " +
-                $"-> mesa {WorldNavigationHandler.GetTableNumber(table)} vaga {WorldNavigationHandler.GetSlotNumber(slot)} slotPos={slot.transform.position}");
-            ArmSeatSnap(bench.gameObject, seatForSnap, slot, table);
-            ScreenReader.Say($"Movendo banco pra mesa {WorldNavigationHandler.GetTableNumber(table)}, vaga {WorldNavigationHandler.GetSlotNumber(slot)}.", interrupt: true);
-            return true;
+                $"-> mesa {WorldNavigationHandler.GetTableNumber(table)} vaga {WorldNavigationHandler.GetSlotNumber(slot)} assoc={assoc.Value}");
+            ArmSeatSnap(bench.gameObject, seat, slot, table);
+            _autoLast = bench;
         }
 
         // Round 99: snap onto the validated target and Deselect in ONE frame. This replaces the

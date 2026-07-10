@@ -3845,6 +3845,42 @@ namespace TravellersRestAccess
             return best;
         }
 
+        // Like FindNearbyValidPlacement but returns ONLY a position that both is game-valid AND
+        // makes the seat associate with a table (never the valid-but-unassociating fallback). Used by
+        // the Alt+M auto-arranger to decide whether a bench can actually be seated here at all - if
+        // this returns null, moving the bench would just scatter it (game-valid but table=null, which
+        // is exactly what the crowded big-bench case produced). Returns null = "won't seat here".
+        public static Vector3? FindAssociatingPlacement(Placeable placeable, Vector3 aroundPos, float maxDistance, Seat associateSeat)
+        {
+            if (placeable == null || associateSeat == null) return null;
+            Vector3 original = placeable.transform.position;
+            Vector3 seatOriginal = associateSeat.transform.position;
+            const float step = 0.25f;
+            int range = Mathf.CeilToInt(maxDistance / step);
+            var candidates = new System.Collections.Generic.List<Vector3>();
+            for (int dx = -range; dx <= range; dx++)
+                for (int dy = -range; dy <= range; dy++)
+                {
+                    Vector3 c = new Vector3(aroundPos.x + dx * step, aroundPos.y + dy * step, original.z);
+                    if (Vector3.Distance(aroundPos, c) <= maxDistance) candidates.Add(c);
+                }
+            candidates.Sort((a, b) => Vector3.Distance(aroundPos, a).CompareTo(Vector3.Distance(aroundPos, b)));
+            Vector3? best = null;
+            foreach (var c in candidates)
+            {
+                placeable.transform.position = c;
+                associateSeat.transform.position = c;
+                Physics2D.SyncTransforms();
+                if (!placeable.IsObjectInValidLocation(true)) continue;
+                try { associateSeat.GetNeighbourTable(); } catch { }
+                if (associateSeat.table != null) { best = c; break; }
+            }
+            placeable.transform.position = original;
+            associateSeat.transform.position = seatOriginal;
+            Physics2D.SyncTransforms();
+            return best;
+        }
+
         public static Vector3? FindNearestValidPosition(Placeable placeable, float maxDistance)
         {
             if (placeable == null) return null;
