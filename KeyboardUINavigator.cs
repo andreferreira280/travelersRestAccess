@@ -685,7 +685,7 @@ namespace TravellersRestAccess
         // DrinkDispenserUI.OpenUI calls GameInventoryUI.Get(..).OpenUI()).
         // GameCraftingUI added [54]: the oven/malt are stations too - RightArrow should switch
         // to the inventory (ingredients) just like the drinks dispenser/containers do.
-        private static bool IsStationWindow(UIWindow w) => w is ContainerUI || w is DrinkDispenserUI || w is GameCraftingUI || w is AgingBarrelUI || w is FireplaceUI;
+        private static bool IsStationWindow(UIWindow w) => w is ContainerUI || w is DrinkDispenserUI || w is GameCraftingUI || w is AgingBarrelUI || w is FireplaceUI || w is OrderQuestUI;
 
         private static UIWindow GetOpenStationWindow()
         {
@@ -771,6 +771,11 @@ namespace TravellersRestAccess
                     return;
                 }
             }
+            // Notice board: populate the inventory with items compatible with active orders before switching.
+            if (toInventory && stationWindow is OrderQuestUI noticeBoardInv)
+            {
+                try { noticeBoardInv.UpdateInventory(); } catch { }
+            }
             _manualWindowOverride = toInventory ? inventoryWindow : stationWindow;
             if (Main.DebugMode) DebugLogger.LogState($"KeyboardUINavigator: switched focus to {(toInventory ? "inventory" : "station")}");
 
@@ -779,7 +784,10 @@ namespace TravellersRestAccess
             if (toInventory)
             {
                 int items = CountInventoryItems(inventoryWindow);
-                ScreenReader.Say(items == 0 ? "Inventário vazio, nada pra adicionar" : "Inventário", interrupt: true);
+                bool isNoticeBoard = stationWindow is OrderQuestUI;
+                string emptyMsg = isNoticeBoard ? "Inventário vazio, nada compatível" : "Inventário vazio, nada pra adicionar";
+                string fullMsg = isNoticeBoard ? "Inventário com itens compatíveis" : "Inventário";
+                ScreenReader.Say(items == 0 ? emptyMsg : fullMsg, interrupt: true);
             }
             else
             {
@@ -1799,6 +1807,17 @@ namespace TravellersRestAccess
                 }
                 catch { }
 
+                // Aging requirement: only announce when the order actually requires a NAMED aging
+                // tier (rank >= 2: jovem/reserva/grande reserva). Non-ageable orders default to a
+                // low agingRank, so gating at >= 2 stops every order from mentioning aging
+                // (user: "só produtos que precisam envelhecer, tipo bebidas e queijos").
+                try
+                {
+                    int ar = quest.agingRank;
+                    if (ar >= 2) s += $". Requer {AgingLevelName(ar)}";
+                }
+                catch { }
+
                 // Reward: reputation + any item rewards.
                 try
                 {
@@ -1849,8 +1868,24 @@ namespace TravellersRestAccess
             return result;
         }
 
-        // For a slot inside an AgingBarrelUI, returns ", nível de envelhecimento N" (+ progress %),
-        // matching the SlotUI to its barrel index via the barrel's own inputSlot array.
+        // Friendly name for a food aging rank (FoodInstance.GBCJNGADANM: 0..4, max=4).
+        // The game names only its tiers Unaged(0)/Young(2)/Reserve(3)/GrandReserve(4); rank 1 is a
+        // transient step below "young" (game shows no label there), so we fold it into "sem
+        // envelhecimento". Names chosen by the user: sem envelhecimento / jovem / reserva / grande reserva.
+        public static string AgingLevelName(int rank)
+        {
+            switch (rank)
+            {
+                case 2: return "jovem";
+                case 3: return "reserva";
+                case 4: return "grande reserva";
+                default: return "sem envelhecimento"; // 0 and 1
+            }
+        }
+
+        // For a slot inside an AgingBarrelUI, returns ", <aging level>" (+ progress % toward the
+        // next level). Uses the drink's REAL aging rank (FoodInstance.GBCJNGADANM), not the barrel's
+        // agingLevel target field (which stayed at 1 - user: "mesmo no nível máximo diz sempre lv 1").
         private static string AgingBarrelSlotInfo(SlotUI slotUI, Slot slot)
         {
             try
@@ -1864,13 +1899,14 @@ namespace TravellersRestAccess
                     if (barrel.inputSlot[i] == slot) { idx = i; break; }
                 if (idx < 0) return null;
 
-                string extra = "";
-                if (barrel.agingLevel != null && idx < barrel.agingLevel.Length)
-                    extra += $", nível de envelhecimento {barrel.agingLevel[idx]}";
-                if (barrel.timer != null && idx < barrel.timer.Length && barrel.timer[idx] != null)
+                var fi = slot.itemInstance as FoodInstance;
+                if (fi == null) return null;
+                int rank = fi.GBCJNGADANM;
+                string extra = ", " + AgingLevelName(rank);
+                if (rank < 4 && barrel.timer != null && idx < barrel.timer.Length && barrel.timer[idx] != null)
                 {
                     float p = barrel.timer[idx].ONLGPFBKFIE();
-                    if (p >= 0f && p <= 1f) extra += $", {Mathf.RoundToInt(p * 100f)} por cento envelhecido";
+                    if (p >= 0f && p <= 1f) extra += $", {Mathf.RoundToInt(p * 100f)} por cento para o próximo nível";
                 }
                 return extra;
             }
@@ -1991,19 +2027,36 @@ namespace TravellersRestAccess
 
                 // Recipe row: read the DATA fields, not ticketPrice.text (that field shows the cost OR
                 // "Nível necessário: N" depending on lock state - the source of the confusing output).
+                // shop.usingRecipeFragments distinguishes "buy with fragments" (Penny-style recipe shop)
+                // from "buy with money" (sawmill blueprints: recipeFragments==0, paid in gold/silver).
                 string name = null;
                 try { name = se.item != null ? se.item.IABAKHPEOAF() : recipe.output.item.IABAKHPEOAF(); } catch { }
                 if (string.IsNullOrEmpty(name)) name = "Receita";
 
-                bool canBuy = RecipeShopCanBuy(recipe, out int cost, out int level, out bool repOk, out bool afford);
-                var parts = new System.Collections.Generic.List<string> { $"{name}, custa {cost} fragmento{(cost == 1 ? "" : "s")}" };
-                if (level > 0) parts.Add($"nível necessário {level}");
-                parts.Add(canBuy ? "dá pra comprar"
-                    : !repOk ? $"bloqueada, falta nível {level}"
-                    : !afford ? "bloqueada, fragmentos insuficientes"
-                    : "já desbloqueada");
-                if (Main.DebugMode) DebugLogger.LogState($"DescribeShopElement recipe=\"{name}\" cost={cost} level={level} repOk={repOk} afford={afford} canBuy={canBuy}");
-                return string.Join(", ", parts);
+                bool usingFrags = el.shopBase?.shop?.usingRecipeFragments == true;
+                if (usingFrags)
+                {
+                    bool canBuy = RecipeShopCanBuy(recipe, out int cost, out int level, out bool repOk, out bool afford);
+                    var parts = new System.Collections.Generic.List<string> { $"{name}, custa {cost} fragmento{(cost == 1 ? "" : "s")}" };
+                    if (level > 0) parts.Add($"nível necessário {level}");
+                    parts.Add(canBuy ? "dá pra comprar"
+                        : !repOk ? $"bloqueada, falta nível {level}"
+                        : !afford ? "bloqueada, fragmentos insuficientes"
+                        : "já desbloqueada");
+                    if (Main.DebugMode) DebugLogger.LogState($"DescribeShopElement recipe=\"{name}\" frags cost={cost} level={level} repOk={repOk} afford={afford} canBuy={canBuy}");
+                    return string.Join(", ", parts);
+                }
+                else
+                {
+                    // Money-based recipe shop (e.g. sawmill blueprints): show gold/silver/copper price.
+                    string price = FormatShopPrice(el.moneyUI);
+                    bool owned = false;
+                    try { owned = RecipesManager.IsRecipeUnlocked(recipe.id, false); } catch { }
+                    var parts = new System.Collections.Generic.List<string> { price != null ? $"{name}, custa {price}" : name };
+                    parts.Add(owned ? "já desbloqueada" : "dá pra comprar");
+                    if (Main.DebugMode) DebugLogger.LogState($"DescribeShopElement recipe=\"{name}\" money price=\"{price}\" owned={owned}");
+                    return string.Join(", ", parts);
+                }
             }
             catch { return "Item"; }
         }
@@ -2496,23 +2549,48 @@ namespace TravellersRestAccess
             if (shopRow != null && shopRow.shopElement != null && shopRow.shopElement.recipe != null && shopRow.shopBase != null)
             {
                 var recipe = shopRow.shopElement.recipe;
-                bool canBuy = RecipeShopCanBuy(recipe, out int cost, out int level, out bool repOk, out bool afford);
-                if (!canBuy)
-                {
-                    ScreenReader.Say(!repOk ? $"Bloqueada, precisa de nível {level}"
-                        : !afford ? "Fragmentos insuficientes" : "Já desbloqueada", interrupt: true);
-                    return;
-                }
                 string rn = null;
                 try { rn = shopRow.shopElement.item != null ? shopRow.shopElement.item.IABAKHPEOAF() : recipe.output.item.IABAKHPEOAF(); } catch { }
-                try
+                string recName = string.IsNullOrEmpty(rn) ? "Receita" : rn;
+                bool usingFragsBuy = shopRow.shopBase.shop?.usingRecipeFragments == true;
+                if (usingFragsBuy)
                 {
-                    shopRow.shopBase.AddItemToBasket(shopRow.shopElement);
-                    shopRow.shopBase.OrderBasket();
-                    ScreenReader.Say($"{(string.IsNullOrEmpty(rn) ? "Receita" : rn)} comprada. {RecipesManager.recipeFragments} fragmentos restantes.", interrupt: true);
-                    DebugLogger.LogInput("Enter", $"Bought recipe \"{rn}\"");
+                    bool canBuy = RecipeShopCanBuy(recipe, out int cost, out int level, out bool repOk, out bool afford);
+                    if (!canBuy)
+                    {
+                        ScreenReader.Say(!repOk ? $"Bloqueada, precisa de nível {level}"
+                            : !afford ? "Fragmentos insuficientes" : "Já desbloqueada", interrupt: true);
+                        return;
+                    }
+                    try
+                    {
+                        shopRow.shopBase.AddItemToBasket(shopRow.shopElement);
+                        shopRow.shopBase.OrderBasket();
+                        ScreenReader.Say($"{recName} comprada. {RecipesManager.recipeFragments} fragmentos restantes.", interrupt: true);
+                        DebugLogger.LogInput("Enter", $"Bought recipe (frags) \"{rn}\"");
+                    }
+                    catch (System.Exception ex) { if (Main.DebugMode) DebugLogger.LogState($"Recipe buy (frags) threw: {ex.Message}"); }
                 }
-                catch (System.Exception ex) { if (Main.DebugMode) DebugLogger.LogState($"Recipe buy threw: {ex.Message}"); }
+                else
+                {
+                    // Money-based recipe shop (sawmill blueprints etc).
+                    bool owned = false;
+                    try { owned = RecipesManager.IsRecipeUnlocked(recipe.id, false); } catch { }
+                    if (owned) { ScreenReader.Say($"{recName}: já desbloqueada.", interrupt: true); return; }
+                    try
+                    {
+                        shopRow.shopBase.AddItemToBasket(shopRow.shopElement);
+                        shopRow.shopBase.OrderBasket();
+                        bool nowOwned = false;
+                        try { nowOwned = RecipesManager.IsRecipeUnlocked(recipe.id, false); } catch { }
+                        if (nowOwned)
+                            ScreenReader.Say($"{recName} comprada.", interrupt: true);
+                        else
+                            ScreenReader.Say("Moedas insuficientes.", interrupt: true);
+                        DebugLogger.LogInput("Enter", $"Bought recipe (money) \"{rn}\" success={nowOwned}");
+                    }
+                    catch (System.Exception ex) { if (Main.DebugMode) DebugLogger.LogState($"Recipe buy (money) threw: {ex.Message}"); }
+                }
                 return;
             }
             // ITEM shop row (buy with money): Enter opens a "type the quantity" box; on confirm it
@@ -2592,6 +2670,81 @@ namespace TravellersRestAccess
                 var reader = entry.MultiSelectValueReader;
                 string rowLabel = item.gameObject.name == "PreviousButton" ? null : label;
                 StartAdjusting(rowLabel, () => prevButton.onClick.Invoke(), () => nextButton.onClick.Invoke(), reader);
+                return;
+            }
+
+            // Notice-board order: Enter accepts an available order or completes a filled current one.
+            // The game's SelectClicked() already has all the logic; we just need to announce the result.
+            var orderActivate = item.GetComponent<OrderQuestElementUI>() ?? item.GetComponentInParent<OrderQuestElementUI>();
+            if (orderActivate != null && orderActivate.AINAHCLIAFF != null)
+            {
+                var oBtn = orderActivate.button;
+                if (!orderActivate.currentQuestElement)
+                {
+                    // Available order: accept it if slot is free
+                    bool canAccept = false;
+                    try { canAccept = RandomOrderQuestsManager.GGFJGHHHEJC?.CanAddQuestToCurrentQuests() == true; } catch { }
+                    if (!canAccept) { ScreenReader.Say("Já tem 3 pedidos ativos", interrupt: true); return; }
+                    try { oBtn?.onClick.Invoke(); } catch { }
+                    string iName = null;
+                    try { var its = orderActivate.AINAHCLIAFF.INKJOLLEBGI(); if (its != null && its.Length > 0) iName = its[0].IABAKHPEOAF(); } catch { }
+                    ScreenReader.Say($"Pedido aceito: {orderActivate.AINAHCLIAFF.requiredAmount} de {iName ?? "item"}", interrupt: true);
+                    DebugLogger.LogInput("Enter", $"Notice board: accepted order for \"{iName}\"");
+                }
+                else
+                {
+                    // Current order: fill the order slot up to the required amount from the crafting
+                    // inventory (player bag + tavern chests/barrels) and then complete it directly.
+                    // (Previously this required a confusing two-step Right-arrow + Ctrl+Enter dance.)
+                    var mgr = RandomOrderQuestsManager.GGFJGHHHEJC;
+                    var oSlot = orderActivate.slotUI?.IHENCGDNPBL;
+                    string iName = null;
+                    try { var its = orderActivate.AINAHCLIAFF.INKJOLLEBGI(); if (its != null && its.Length > 0) iName = its[0].IABAKHPEOAF(); } catch { }
+                    if (string.IsNullOrEmpty(iName)) iName = "item";
+                    int required = 1;
+                    try { required = orderActivate.AINAHCLIAFF.requiredAmount; } catch { }
+                    if (required <= 0) required = 1;
+
+                    int Have() { try { return (oSlot == null || oSlot.itemInstance == null) ? 0 : oSlot.Stack; } catch { return 0; } }
+
+                    // 1) crafting inventory (player bag + placed containers).
+                    if (Have() < required)
+                        try { mgr?.AutomaticFillQuest(1, orderActivate.AINAHCLIAFF, orderActivate.slotUI); } catch { }
+                    // 2) scan the FULL player inventory (main bag + hotbar), accumulating across slots.
+                    if (Have() < required)
+                    {
+                        Slot[] slots = null;
+                        try { slots = PlayerInventory.GetPlayer(1)?.GetAllSlots(); } catch { }
+                        if (slots != null)
+                            foreach (var s in slots)
+                            {
+                                if (Have() >= required) break;
+                                if (s == null || s.itemInstance == null) continue;
+                                int before = Have();
+                                try { mgr?.TransferItemsFromSlot(1, s, orderActivate.AINAHCLIAFF, orderActivate.slotUI); } catch { }
+                                if (Have() == before) continue;
+                            }
+                    }
+
+                    int have = Have();
+                    if (have <= 0)
+                    {
+                        ScreenReader.Say($"Não encontrei {iName} no seu inventário nem nos baús e barris da taverna", interrupt: true);
+                        DebugLogger.LogInput("Enter", $"Notice board: deliver \"{iName}\" - none found");
+                        return;
+                    }
+                    if (have < required)
+                    {
+                        try { oSlot.Stack = 0; } catch { }
+                        ScreenReader.Say($"Faltam itens: o pedido pede {required} de {iName}, mas só reuni {have}", interrupt: true);
+                        DebugLogger.LogInput("Enter", $"Notice board: deliver \"{iName}\" short required={required} have={have}");
+                        return;
+                    }
+                    bool ok = false;
+                    try { ok = mgr.TryToCompleteOrder(1, orderActivate.num, oSlot.itemInstance, oSlot.Stack); } catch { }
+                    ScreenReader.Say(ok ? $"Pedido entregue: {required} de {iName}" : $"Não foi possível entregar {iName}", interrupt: true);
+                    DebugLogger.LogInput("Enter", $"Notice board: deliver \"{iName}\" required={required} have={have} ok={ok}");
+                }
                 return;
             }
 

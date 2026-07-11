@@ -46,7 +46,7 @@ namespace TravellersRestAccess
         // request, and a new "Repositivos" category for placed consumables that are working but
         // will need restocking (candles). Associated benches leave "Pendentes" automatically (see
         // BuildTargetList - only unassociated benches are listed now).
-        private static readonly string[] CategoryOrder = { "Servir", "Portas", "Comerciantes", "NPCs", "Animais", "Pendentes", "Repositivos", "Containers", "Máquinas", "Cultivo", "Materiais", "Coletáveis", "Decorativos" };
+        private static readonly string[] CategoryOrder = { "Servir", "Portas", "Comerciantes", "NPCs", "Animais", "Caça", "Pendentes", "Repositivos", "Containers", "Máquinas", "Cultivo", "Materiais", "Coletáveis", "Decorativos" };
 
         // The town/region merchants and what each sells (from the wiki, provided by the user). Used to
         // put them in their own "Comerciantes" category (out of "NPCs") with a description, and to let
@@ -83,6 +83,7 @@ namespace TravellersRestAccess
         // a practical stand-in: confirmed live that doors in a different area sit 1000+
         // units away, while the tavern's own doors are single digits apart.
         private const float NearbyDoorRadius = 30f;
+        private const float AnimalApproachRadius = 2.5f; // ~5 tiles (TileSize=0.5)
         // Merchants use a wider radius so the whole current area's merchants are findable, without
         // pulling in cross-map ones (which had broken routes). Scale is large: cross-area gaps are
         // 500-680 units (door distances in the log), intra-area spread is far smaller, so 300 covers
@@ -207,6 +208,16 @@ namespace TravellersRestAccess
         private int _tapsForCurrentStep;
         private int _lastSpokenCountForStep = -1;
 
+        // Target lock: , / . cycle through nearby IInteractable+IProximity objects; the
+        // selected one is used by TryInteractableMouseUp() (Ctrl+Enter) instead of the
+        // closest. Clears automatically after LockTimeout seconds of inactivity.
+        private static MonoBehaviour _lockedProximityTarget;
+        private static float _lockExpireTime;
+        private static readonly System.Collections.Generic.List<MonoBehaviour> _cycleTargets = new System.Collections.Generic.List<MonoBehaviour>();
+        private static int _cycleIndex = -1;
+        private const float LockTimeout = 8f;
+        private const float TargetCycleRadius = 5f; // ~10 tiles
+
         // Wall-bump sound (empirical thresholds - no existing game signal for "blocked
         // movement" was found, so this compares ACTUAL frame-to-frame movement against the
         // MINIMUM expected for the player's own speed while input is held; if it stays far
@@ -321,6 +332,9 @@ namespace TravellersRestAccess
                 HandleDirectionalWallSound();
                 HandleItemProximitySounds();
                 HandleNearbyResourceAnnouncement();
+                HandleAnimalProximityAnnouncement();
+                HandleHuntingProximityAnnouncement();
+                HandleInteractionTargetCycling();
                 HandleArableZoneAnnouncement();
                 HandleToolAimAnnouncement();
                 HandleWellProximitySound();
@@ -2790,13 +2804,70 @@ namespace TravellersRestAccess
             foreach (var a in _cachedAnimals)
             {
                 if (a == null) continue;
-                Consider(a.gameObject, DescribeNpc(a));
+                Consider(a.gameObject, DescribeAnimal(a));
             }
 
             if (bestName != null)
             {
                 ScreenReader.Say(bestName, interrupt: false);
                 if (Main.DebugMode) DebugLogger.LogState($"WorldNav: Tile resource announced \"{bestName}\" dist={bestDist:F1}");
+            }
+        }
+
+        // Announces each farm animal (chicken, cow, sheep, pig) when the player comes within
+        // AnimalApproachRadius. Uses a HashSet for debounce: each animal is announced once per
+        // approach and re-announced only after the player walks away and returns.
+        private void HandleAnimalProximityAnnouncement()
+        {
+            if (_cachedAnimals.Length == 0) return;
+            Vector3 pos = PlayerController.GetPlayerPosition(1);
+            foreach (var a in _cachedAnimals)
+            {
+                if (a == null) continue;
+                float dist = Vector3.Distance(pos, a.transform.position);
+                bool withinRange = dist <= AnimalApproachRadius && a.lives > 0;
+                if (withinRange)
+                {
+                    if (_nearAnimals.Add(a))
+                        ScreenReader.Say(DescribeAnimal(a), interrupt: false);
+                }
+                else
+                {
+                    _nearAnimals.Remove(a);
+                }
+            }
+        }
+
+        private static string DescribeAnimal(AnimalNPC a)
+        {
+            string species = null;
+            try { species = a.CMOBLFMDNKF?.IABAKHPEOAF(); } catch { }
+            string animalName = null;
+            try { animalName = a.NBMNBKEJHPM?.animalName; } catch { }
+            string desc = string.IsNullOrEmpty(species) ? CleanSceneObjectName(a.gameObject.name) : species;
+            if (!string.IsNullOrEmpty(animalName)) desc += $" {animalName}";
+            if (a.isSick) desc += ", doente";
+            return desc;
+        }
+
+        // Announces wild-huntable animals (turkey, crab) when player comes within
+        // AnimalApproachRadius. Named from the game object name (they have no item/name data).
+        private void HandleHuntingProximityAnnouncement()
+        {
+            Vector3 pos = PlayerController.GetPlayerPosition(1);
+            foreach (var t in _cachedTurkeys)
+            {
+                if (t == null || !t.gameObject.activeInHierarchy) continue;
+                bool inRange = Vector3.Distance(pos, t.transform.position) <= AnimalApproachRadius;
+                if (inRange) { if (_nearTurkeys.Add(t)) ScreenReader.Say("Peru", interrupt: false); }
+                else _nearTurkeys.Remove(t);
+            }
+            foreach (var c in _cachedCrabs)
+            {
+                if (c == null || !c.gameObject.activeInHierarchy) continue;
+                bool inRange = Vector3.Distance(pos, c.transform.position) <= AnimalApproachRadius;
+                if (inRange) { if (_nearCrabs.Add(c)) ScreenReader.Say("Caranguejo", interrupt: false); }
+                else _nearCrabs.Remove(c);
             }
         }
 
@@ -3239,9 +3310,24 @@ namespace TravellersRestAccess
             foreach (var animal in _cachedAnimals)
             {
                 if (animal == null || Vector3.Distance(playerPos, animal.transform.position) > NearbyDoorRadius) continue;
-                string an = CleanSceneObjectName(animal.gameObject.name);
+                string an = DescribeAnimal(animal);
                 if (string.IsNullOrEmpty(an)) an = "Animal";
                 list.Add((an, GetApproachPosition(animal.gameObject, playerPos), "Animais"));
+            }
+
+            // "Caça": wild-huntable creatures (turkeys, crabs). These don't implement IProximity
+            // so the game never announces them; we scan them separately and add to the nav list.
+            foreach (var turkey in _cachedTurkeys)
+            {
+                if (turkey == null || !turkey.gameObject.activeInHierarchy) continue;
+                if (Vector3.Distance(playerPos, turkey.transform.position) > NearbyDoorRadius) continue;
+                list.Add(("Peru", GetApproachPosition(turkey.gameObject, playerPos), "Caça"));
+            }
+            foreach (var crab in _cachedCrabs)
+            {
+                if (crab == null || !crab.gameObject.activeInHierarchy) continue;
+                if (Vector3.Distance(playerPos, crab.transform.position) > NearbyDoorRadius) continue;
+                list.Add(("Caranguejo", GetApproachPosition(crab.gameObject, playerPos), "Caça"));
             }
 
             // "Cultivo": tilled/planted tiles the player wants to find (plant/water/harvest). Each
@@ -5226,6 +5312,11 @@ namespace TravellersRestAccess
         private MiscellaneousHarvest[] _cachedMiscHarvests = new MiscellaneousHarvest[0];
         private Tree[] _cachedTrees = new Tree[0];
         private AnimalNPC[] _cachedAnimals = new AnimalNPC[0];
+        private readonly System.Collections.Generic.HashSet<AnimalNPC> _nearAnimals = new System.Collections.Generic.HashSet<AnimalNPC>();
+        private TurkeyNPC[] _cachedTurkeys = new TurkeyNPC[0];
+        private readonly System.Collections.Generic.HashSet<TurkeyNPC> _nearTurkeys = new System.Collections.Generic.HashSet<TurkeyNPC>();
+        private CrabNPC[] _cachedCrabs = new CrabNPC[0];
+        private readonly System.Collections.Generic.HashSet<CrabNPC> _nearCrabs = new System.Collections.Generic.HashSet<CrabNPC>();
         private Rock[] _cachedRocks = new Rock[0];
         private FertileSoil[] _cachedFertileSoils = new FertileSoil[0];
         private Vector2Int _lastResourceTile = new Vector2Int(int.MinValue, int.MinValue);
@@ -5328,10 +5419,12 @@ namespace TravellersRestAccess
                 case 8: if (mining) { _cachedFertileSoils = new FertileSoil[0]; break; } _cachedFertileSoils = FindAll<FertileSoil>(); break;
                 case 9: if (mining) { _cachedSeats = new Seat[0]; break; } _cachedSeats = FindAll<Seat>(); break;
                 case 10: if (mining) { _cachedTables = new Table[0]; break; } _cachedTables = FindAll<Table>(); break;
+                case 11: _cachedTurkeys = FindAll<TurkeyNPC>(); break;
+                case 12: _cachedCrabs = FindAll<CrabNPC>(); break;
             }
             if (sw != null && sw.ElapsedMilliseconds > 3) DebugLogger.LogState($"WorldNav: PERF scene scan stage {_sceneScanStage} took {sw.ElapsedMilliseconds}ms");
             _sceneScanStage++;
-            if (_sceneScanStage > 10) _sceneScanStage = -1;
+            if (_sceneScanStage > 12) _sceneScanStage = -1;
         }
 
         private GameObject _lastNearRat;
@@ -6213,6 +6306,58 @@ namespace TravellersRestAccess
             }
         }
 
+        // , and . cycle through nearby interactable objects so the user can choose which one
+        // to interact with when several are close (e.g. two NPCs overlapping). The chosen
+        // target is "locked" for LockTimeout seconds and used by TryInteractableMouseUp()
+        // (Ctrl+Enter) instead of the nearest. , = previous, . = next.
+        private void HandleInteractionTargetCycling()
+        {
+            bool comma = Input.GetKeyDown(KeyCode.Comma);
+            bool period = Input.GetKeyDown(KeyCode.Period);
+            if (!comma && !period) return;
+
+            // Rebuild the candidate list fresh each keypress (targets move / become unavailable)
+            Vector3 playerPos = PlayerController.GetPlayerPosition(1);
+            _cycleTargets.Clear();
+            foreach (var b in FindAll<MonoBehaviour>())
+            {
+                if (!(b is IInteractable) || !(b is IProximity prox)) continue;
+                if (Vector3.Distance(playerPos, b.transform.position) > TargetCycleRadius) continue;
+                bool avail = false;
+                try { avail = prox.IsAvailableByProximity(1); } catch { }
+                if (!avail) continue;
+                _cycleTargets.Add(b);
+            }
+            _cycleTargets.Sort((a, b) => Vector3.Distance(playerPos, a.transform.position)
+                                       .CompareTo(Vector3.Distance(playerPos, b.transform.position)));
+
+            if (_cycleTargets.Count == 0)
+            {
+                ScreenReader.Say("Nada por perto", interrupt: true);
+                _lockedProximityTarget = null;
+                return;
+            }
+
+            // Advance index in the sorted list; if the current lock is in the list, start from it
+            if (_lockedProximityTarget != null)
+                _cycleIndex = _cycleTargets.IndexOf(_lockedProximityTarget);
+            if (_cycleIndex < 0) _cycleIndex = period ? 0 : _cycleTargets.Count - 1;
+            else _cycleIndex = ((period ? _cycleIndex + 1 : _cycleIndex - 1) + _cycleTargets.Count) % _cycleTargets.Count;
+
+            _lockedProximityTarget = _cycleTargets[_cycleIndex];
+            _lockExpireTime = Time.unscaledTime + LockTimeout;
+
+            // Announce the selected target
+            string name = null;
+            try { name = DescribeNpc(_lockedProximityTarget.gameObject); } catch { }
+            if (string.IsNullOrEmpty(name))
+                try { name = DescribePlaceable(_lockedProximityTarget.GetComponent<Placeable>()); } catch { }
+            if (string.IsNullOrEmpty(name))
+                name = CleanSceneObjectName(_lockedProximityTarget.gameObject.name);
+            ScreenReader.Say($"{name} ({_cycleIndex + 1}/{_cycleTargets.Count}). Ctrl+Enter pra interagir.", interrupt: true);
+            DebugLogger.LogInput(comma ? "," : ".", $"Cycle target [{_cycleIndex}]: \"{_lockedProximityTarget.gameObject.name}\"");
+        }
+
         private void HandleSimulatedClick()
         {
             bool ctrl = Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl);
@@ -6255,11 +6400,23 @@ namespace TravellersRestAccess
         // re-addressed with a proximity check that doesn't false-negative on big stations.)
         private static bool TryInteractableMouseUp()
         {
-            var closest = FindClosestAvailableByProximity();
-            if (closest == null) return false;
+            // Use a user-chosen target (from , / . cycling) when one is locked and still valid.
+            MonoBehaviour target = null;
+            if (_lockedProximityTarget != null && Time.unscaledTime < _lockExpireTime)
+            {
+                bool stillAvailable = false;
+                try { stillAvailable = ((IProximity)_lockedProximityTarget).IsAvailableByProximity(1); } catch { }
+                if (stillAvailable) target = _lockedProximityTarget;
+                else { _lockedProximityTarget = null; } // stale lock - clear it
+            }
+            target = target ?? FindClosestAvailableByProximity();
+            if (target == null) return false;
 
-            bool handled = ((IInteractable)closest).MouseUp(1);
-            DebugLogger.LogInput("Ctrl+Enter", $"IInteractable.MouseUp on \"{closest.gameObject.name}\" -> {handled}");
+            // Clear the lock after interacting so the next Ctrl+Enter picks freely again
+            _lockedProximityTarget = null;
+
+            bool handled = ((IInteractable)target).MouseUp(1);
+            DebugLogger.LogInput("Ctrl+Enter", $"IInteractable.MouseUp on \"{target.gameObject.name}\" -> {handled}");
             return handled;
         }
 

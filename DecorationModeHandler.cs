@@ -315,6 +315,12 @@ namespace TravellersRestAccess
                     ? WorldNavigationHandler.DescribeDecorationName(grabbedPlaceableForName)
                     : "Item";
                 string holdMsg = $"{grabbedName} pego. Use as setas pra mover, Enter pra soltar.";
+                // If the item has a zone restriction, tell the player where it must go.
+                if (grabbedPlaceableForName != null)
+                {
+                    string zoneHint = DescribeZoneRequirement(grabbedPlaceableForName.zoneTypeNeeded);
+                    if (zoneHint != null) holdMsg += $" {zoneHint}.";
+                }
                 ScreenReader.Say(holdMsg, interrupt: true);
                 _lastGuidanceTileOffset = null;
                 _wasdReminderGivenThisHold = false;
@@ -791,6 +797,23 @@ namespace TravellersRestAccess
         }
 
         // Round 226: name + direction/distance of a grab candidate, so the blind player knows
+        // Returns a Portuguese zone placement hint for items with zone restrictions, or null if unrestricted.
+        private static string DescribeZoneRequirement(ZoneType zoneType)
+        {
+            if (zoneType == ZoneType.Anywhere || zoneType == 0) return null;
+            var zones = new System.Collections.Generic.List<string>();
+            if ((zoneType & ZoneType.WithoutZone) != 0) zones.Add("área geral");
+            if ((zoneType & ZoneType.DiningRoom) != 0) zones.Add("sala de jantar");
+            if ((zoneType & ZoneType.CraftingRoom) != 0) zones.Add("sala de trabalho");
+            if ((zoneType & ZoneType.RentedRoom) != 0) zones.Add("quarto para alugar");
+            if ((zoneType & ZoneType.Cellar) != 0) zones.Add("adega");
+            if ((zoneType & ZoneType.WoodWorkshop) != 0) zones.Add("oficina de madeira");
+            if ((zoneType & ZoneType.MetalWorkshop) != 0) zones.Add("oficina de metal");
+            if ((zoneType & ZoneType.StoneWorkshop) != 0) zones.Add("oficina de pedra");
+            if (zones.Count == 0) return null;
+            return "Vai em: " + string.Join(" ou ", zones);
+        }
+
         // exactly which object (and where) they're about to pick up before pressing Enter.
         private string DescribeGrabTarget(Placeable p, Vector3 playerPos)
         {
@@ -1453,10 +1476,49 @@ namespace TravellersRestAccess
             }
             if (chosen == null)
             {
-                // No inter-table crowding. Check for wall-blocked slots and push the nearest table
-                // away from the wall that is causing the block. FindWallFix tries all 4 directions
-                // because the wall may be perpendicular to the slot (e.g. south wall blocks a
-                // Left-direction bench - only pushing Up/north fixes it, not pushing Right).
+                // Phase 2a: if any table is in an invalid position (IsObjectInValidLocation=False,
+                // e.g. too close to the south wall), snap it to the nearest valid spot directly.
+                // FindWallFix's slot dry-run fails for this case because the table's own WorldGrid
+                // footprint blocks the shifted-seat test positions, always returning 0.
+                Table snapTable = null; float snapTableDist = float.MaxValue;
+                foreach (var t in tables)
+                {
+                    if (t == null || t.placeable == null) continue;
+                    bool tableValid = false;
+                    try { tableValid = t.placeable.IsObjectInValidLocation(false); } catch { }
+                    MelonLoader.MelonLogger.Msg($"TableSpread: valid-check mesa {WorldNavigationHandler.GetTableNumber(t)} pos={t.transform.position} valid={tableValid}");
+                    if (tableValid) continue;
+                    float dp = Vector3.Distance(playerPos, t.transform.position);
+                    if (dp < snapTableDist) { snapTableDist = dp; snapTable = t; }
+                }
+                if (snapTable != null)
+                {
+                    var snapPlaceable = snapTable.placeable;
+                    Vector3 snapOrig = snapPlaceable.transform.position;
+                    var snapValid = WorldNavigationHandler.FindNearestValidPosition(snapPlaceable, 3f);
+                    int snapNum = WorldNavigationHandler.GetTableNumber(snapTable);
+                    MelonLoader.MelonLogger.Msg($"TableSpread: snap-valid mesa {snapNum} de {snapOrig} -> {(snapValid.HasValue ? snapValid.Value.ToString() : "null")}");
+                    if (!snapValid.HasValue)
+                    {
+                        ScreenReader.Say("As mesas já estão bem posicionadas.", interrupt: true);
+                        return true;
+                    }
+                    if (!selectObj.SelectPlaceable(snapPlaceable))
+                    {
+                        ScreenReader.Say("Não consegui pegar a mesa.", interrupt: true);
+                        return true;
+                    }
+                    snapPlaceable.SetMouseOffset(Vector3.zero);
+                    snapPlaceable.RemoveFromSurface(false);
+                    _tableSpreadObj = snapPlaceable.gameObject;
+                    _tableSpreadOrig = snapOrig;
+                    SnapAndConfirm(selectObj, snapPlaceable.gameObject, snapPlaceable, snapValid.Value, null, "tableSpread");
+                    ScreenReader.Say($"Mesa {snapNum}: reposicionando para local válido.", interrupt: true);
+                    return true;
+                }
+
+                // Phase 2b: all tables are in valid positions, but some bench slots may be blocked
+                // by a nearby wall. FindWallFix tries all 4 directions on seat slot positions.
                 Seat[] allSeats = null;
                 try { allSeats = Object.FindObjectsByType<Seat>(FindObjectsSortMode.None); } catch { }
                 Table wallTable = null; Direction wallPushDir = Direction.Up; float wallTableDist = float.MaxValue; float wallPushDist = 0f;
@@ -1480,9 +1542,9 @@ namespace TravellersRestAccess
                 Vector3 wallOrig = wallPlaceable.transform.position;
                 Vector3 wallTarget = wallOrig + pushVec * wallPushDist;
                 wallPlaceable.transform.position = wallTarget; Physics2D.SyncTransforms();
-                var wallValid = WorldNavigationHandler.FindNearestValidPosition(wallPlaceable, 3f);
+                var wallValidPos = WorldNavigationHandler.FindNearestValidPosition(wallPlaceable, 3f);
                 wallPlaceable.transform.position = wallOrig; Physics2D.SyncTransforms();
-                Vector3 wallFinal = wallValid ?? wallTarget;
+                Vector3 wallFinal = wallValidPos ?? wallTarget;
                 if (!selectObj.SelectPlaceable(wallPlaceable))
                 {
                     ScreenReader.Say("Não consegui pegar a mesa.", interrupt: true);

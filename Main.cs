@@ -145,6 +145,7 @@ namespace TravellersRestAccess
                     TavernStatsPatch.Apply(_harmony);
                     ToolSoundPatch.Apply(_harmony);
                     ToolCursorAimPatch.Apply(_harmony);
+                    ConstructionTableHandler.Apply(_harmony);
                     // User's explicit request 2026-06-19: arrow keys should never move the
                     // character, even outside menus (Up/Down stay free for re-reading
                     // dialogue - that's handled separately in DialogueAnnouncer, unaffected
@@ -284,6 +285,7 @@ namespace TravellersRestAccess
             _drinkServingHandler.Update();
             _tableArrangeHandler.Update(anyUiOpen);
             _missionDiagnosticHandler.Update();
+            ConstructionTableHandler.Update();
             // The FuelUI (oven/malt/fermentation fuel) is owned entirely by FuelStationHandler.
             // Skip the transfer handler there so its Ctrl+Enter routing can't fire alongside the
             // fuel add (that double-handling is what scrambled the hotbar in the reverted attempts).

@@ -300,6 +300,15 @@ namespace TravellersRestAccess
                 return;
             }
 
+            // Notice board (OrderQuestUI): Ctrl+Enter transfers the focused inventory item to the
+            // first current order that accepts it. Not a Container, so the chest path would refuse.
+            var noticeBoard = OrderQuestUI.Get(playerNum);
+            if (noticeBoard != null && noticeBoard.IsOpen())
+            {
+                HandleNoticeBoardTransfer(playerNum, noticeBoard);
+                return;
+            }
+
             // [54] Oven / crafting station: a Crafter is NOT a Container - ingredients aren't held
             // in station slots like a chest. The game shift-clicks them into the recipe's
             // modifier/ingredient slots (and back out) via SlotUI.DoAutomaticTransfer. So when the
@@ -396,6 +405,44 @@ namespace TravellersRestAccess
             int units = amount == Amount.Half ? Math.Max(1, sourceSlot.Stack / 2) : int.MaxValue;
             if (Main.DebugMode) DebugLogger.LogState($"InventoryTransfer: container {amount} sourceIsStation={sourceIsStation} target={target?.GetType().Name} units={(units == int.MaxValue ? "todos" : units.ToString())} srcStack={sourceSlot.Stack}");
             MoveStack(playerNum, sourceSlot, target, actionLabel, units);
+        }
+
+        // Notice board: transfer the focused inventory item into the first active current order that
+        // accepts it. Uses TransferItemsFromSlot (the game's own drag-and-drop back-end).
+        private void HandleNoticeBoardTransfer(int playerNum, OrderQuestUI noticeBoard)
+        {
+            Slot invSlot = GetFocusedSlot();
+            if (invSlot == null || invSlot.itemInstance == null)
+            {
+                ScreenReader.Say("Nenhum item selecionado no inventário", interrupt: true);
+                return;
+            }
+
+            foreach (var el in noticeBoard.currentOrderQuestElements)
+            {
+                if (el == null || !el.gameObject.activeSelf || el.AINAHCLIAFF == null) continue;
+                bool compatible = false;
+                try { compatible = el.AINAHCLIAFF.FJDFAEDIAFJ(playerNum, invSlot.itemInstance, invSlot.Stack, KIKDLKGBCOC: false, IOKHPOANELD: false); } catch { }
+                if (!compatible) continue;
+
+                bool ok = false;
+                try { ok = RandomOrderQuestsManager.GGFJGHHHEJC.TransferItemsFromSlot(playerNum, invSlot, el.AINAHCLIAFF, el.slotUI); } catch { }
+                if (ok)
+                {
+                    string itemName = null;
+                    try { itemName = invSlot.itemInstance?.LHBPOPOIFLE()?.IABAKHPEOAF(); } catch { }
+                    string orderName = null;
+                    try { var its = el.AINAHCLIAFF.INKJOLLEBGI(); if (its != null && its.Length > 0) orderName = its[0].IABAKHPEOAF(); } catch { }
+                    ScreenReader.Say($"{itemName ?? "Item"} movido para o pedido de {orderName ?? "item"}", interrupt: true);
+                    try { noticeBoard.UpdateInventory(); } catch { }
+                }
+                else
+                {
+                    ScreenReader.Say("Item incompatível ou pedido já completo", interrupt: true);
+                }
+                return;
+            }
+            ScreenReader.Say("Item não compatível com nenhum pedido ativo", interrupt: true);
         }
 
         // Aging barrel: move an EXACT amount between the player's inventory and the barrel's own

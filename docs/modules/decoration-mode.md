@@ -1794,12 +1794,91 @@ agora chama `FindNearestSnapPosition` com `SeatSlotGuidanceSearchRadius`
 
 Build limpo. Pedindo teste.
 
+## 42ª rodada (2026-07-10) - F7 wall-spread: FindWallFix tenta 4 direções; 11/12 vagas, 0 bancos soltos
+
+Feature F7 (espalhador de mesas em deco mode) ganhou uma segunda fase:
+quando nenhum par de mesas está próximo demais, varre as mesas em busca
+de vagas de banco bloqueadas pela parede e move a mesa mais próxima pra
+longe da parede.
+
+### O problema anterior (só tentava direção oposta ao slot)
+
+`HandleTableSpreadKey` chamava `FindWallPushDistance(blockedDir=slot.direction)`
+- testava apenas o oposto da direção do slot. Ex.: slot `Left` → empurrava
+pra `Right`. Mas o bloqueio real era a borda **sul** do piso (eixo Y), não
+uma parede lateral. Empurrar esquerda/direita nunca ajuda um problema de Y.
+A função retornava 0 para todas as direções que testava, e o mod concluía
+"bem posicionadas" mesmo com vagas bloqueadas.
+
+### Causa raiz documentada via log
+
+`FindWallPushDistance` com `verbose=true` mostrou que as posições de banco
+em y≈906.25 e y≈906.75 retornavam `ok=False` em TODOS os valores de x
+testados (x=14.25 até x=16.75). Isso prova que o bloqueio é no eixo Y
+(borda sul do piso), não X (parede lateral). Apenas empurrar para Up
+(norte, +Y) unblockeia as vagas.
+
+### Descobertas importantes sobre LKBLKCFOEPA
+
+`WorldGrid.LKBLKCFOEPA(pos)` retorna `False` tanto para tiles sem chão
+(parede/void) quanto para tiles **ocupados** (tem objeto registrado).
+Um banco já colocado no tile faz a posição retornar False - é uma checagem
+de tile-slot livre, não só de existência de chão.
+
+### Descoberta importante: slot direction ≠ direção da parede
+
+`SeatingGroup.direction` é a direção DO slot RELATIVO À MESA (onde o banco
+fica). Um slot `Left` significa que o banco fica à esquerda da mesa. Mas
+esse mesmo slot pode estar bloqueado pela parede **sul** se a mesa ficou
+perto do limite inferior da sala. A direção do bloqueio é independente da
+direção do slot.
+
+### FindWallFix: tenta todas as 4 direções cardinais
+
+`WorldNavigationHandler.FindWallFix(table, seats)` (novo método):
+1. Coleta posições de vagas bloqueadas (não-ocupadas por bench existente, e
+   `LKBLKCFOEPA` retorna False).
+2. Testa as 4 direções (Right/Left/Up/Down) em passos de 0.5u até maxSteps=16.
+3. Retorna a primeira direção + distância onde pelo menos uma vaga bloqueada
+   passa a ter `LKBLKCFOEPA=True`.
+4. Retorna `(Direction.Up, 0f)` como sentinel "não encontrado".
+
+Limitação conhecida: o dry-run desloca a posição do banco mas a mesa ainda
+está registrada no WorldGrid. Posições dentro do footprint da mesa na grade
+ainda retornam False mesmo depois do deslocamento. Na prática isso não
+impediu o funcionamento porque o inter-table spread já havia movido as mesas
+antes, liberando o footprint.
+
+### HandleTableSpreadKey: branch wall-spread
+
+Quando `chosen == null` (nenhum par de mesas próximas demais):
+- Chama `FindWallFix` para cada mesa.
+- Escolhe a mesa mais próxima do jogador que tem `fixDist > 0`.
+- Se nenhuma: anuncia "bem posicionadas".
+- Se encontrou: move via `SelectPlaceable` + `SnapAndConfirm` com safety-net
+  (restaura posição original se o jogo recusar o movimento).
+
+### TableArrangeHandler: Alt+M agora usa FindWallFix para hints
+
+O relatório do Alt+M ao encontrar vagas bloqueadas agora chama `FindWallFix`
+para dar a direção correta ao usuário ("mova a mesa pra cima" em vez de
+"mova a mesa pra direita/esquerda").
+
+### Estado final da taverna após as sessões
+
+- 11/12 vagas ocupadas, 0 bancos soltos.
+- 1 vaga permanentemente bloqueada (borda da sala): `FindWallFix` retorna
+  dist=0 para ela - log mostra "sem fix encontrado" corretamente.
+- Com 11/12 vagas e todos os bancos associados, todos os clientes podem
+  se sentar. A limitação é física da sala, não bug do mod.
+
 ## Arquivos relevantes
 
 - `DecorationModeHandler.cs` - handler novo desta feature. Modelo
   unificado: todos os itens movem por setas (desacoplado do andar),
   inicializado ao pegar em qualquer via. `SnapAndConfirm` faz snap +
-  SyncTransforms + Deselect na mesma frame.
+  SyncTransforms + Deselect na mesma frame. F7 `HandleTableSpreadKey`:
+  fase 1 inter-table spread, fase 2 wall-spread via `FindWallFix`.
 - `Main.cs` - inicializa e chama `Update()` (incondicional, fora do
   `anyUiOpen`).
 - `WorldNavigationHandler.cs` - `Seat` na categoria "Missão";
@@ -1807,4 +1886,9 @@ Build limpo. Pedindo teste.
   unificada usando a checagem real do jogo, p/ parede e espaço livre);
   `FindNearestValidSurface`/`FindSurfaceAtPosition` (superfície);
   `LogDeselectGate` (loga a decisão real do Deselect);
-  `LogItemSpaceValidityDiagnostic` (diagnóstico de espaço livre).
+  `LogItemSpaceValidityDiagnostic` (diagnóstico de espaço livre);
+  `FindWallFix` (tenta 4 direções para achar push que desbloqueia vagas
+  de banco contra parede); `FindWallPushDistance` (single-direction,
+  verbose mode, usado internamente).
+- `TableArrangeHandler.cs` - Alt+M: associa bancos + relatório de
+  layout; usa `FindWallFix` para hints de direção em vagas bloqueadas.
