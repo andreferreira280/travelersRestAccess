@@ -399,13 +399,15 @@ namespace TravellersRestAccess
 
         private void HandleAdvanceAndRereadInput()
         {
-            // Up re-reads the main story/conversation line; Down re-reads the last ambient
+            // Shift+Up re-reads the main story/conversation line; Down re-reads the last ambient
             // bark - kept separate so one doesn't clobber the other (see field comments).
-            if (Input.GetKeyDown(KeyCode.UpArrow))
+            // (User moved the story re-read off plain Up onto Shift+Up.)
+            bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+            if (shift && Input.GetKeyDown(KeyCode.UpArrow))
             {
                 if (!string.IsNullOrEmpty(_lastStoryMessage))
                 {
-                    DebugLogger.LogInput("Up", "Re-read story dialogue");
+                    DebugLogger.LogInput("Shift+Up", "Re-read story dialogue");
                     ScreenReader.Announce(_lastStoryMessage);
                 }
                 return;

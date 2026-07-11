@@ -146,6 +146,7 @@ namespace TravellersRestAccess
                     ToolSoundPatch.Apply(_harmony);
                     ToolCursorAimPatch.Apply(_harmony);
                     ConstructionTableHandler.Apply(_harmony);
+                    ConstructionInputInjector.Apply(_harmony);
                     // User's explicit request 2026-06-19: arrow keys should never move the
                     // character, even outside menus (Up/Down stay free for re-reading
                     // dialogue - that's handled separately in DialogueAnnouncer, unaffected

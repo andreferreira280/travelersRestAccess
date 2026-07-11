@@ -417,10 +417,21 @@ namespace TravellersRestAccess
                 // segundo"). Plain Enter still activates.
                 Activate();
             }
-            // Space is intentionally NOT used to activate anything here. It kept closing
-            // Character Creator from anywhere on the screen even after restricting it to
-            // the Accept button and clearing Unity's real selection every frame - neither
-            // fix stopped it (confirmed live twice), so per the user's own suggestion,
+            else if (Input.GetKeyDown(KeyCode.Space) && topWindowNow is YesNoDialogueUI
+                && !Input.GetKey(KeyCode.LeftControl) && !Input.GetKey(KeyCode.RightControl)
+                && !Input.GetKey(KeyCode.LeftShift) && !Input.GetKey(KeyCode.RightShift)
+                && !Input.GetKey(KeyCode.LeftAlt) && !Input.GetKey(KeyCode.RightAlt))
+            {
+                // In a Yes/No (Cancelar/Aceitar) popup, Space ALSO activates the focused button, so
+                // the user can confirm the highlighted option (e.g. Cancelar) with Space — Enter
+                // already worked, but the user reported Space/Enter "not cancelling". Space stays
+                // untouched in every OTHER menu (see below).
+                Activate();
+            }
+            // Space is intentionally NOT used to activate anything here (except the Yes/No case
+            // above). It kept closing Character Creator from anywhere on the screen even after
+            // restricting it to the Accept button and clearing Unity's real selection every frame -
+            // neither fix stopped it (confirmed live twice), so per the user's own suggestion,
             // Space is left alone entirely in menus and reserved only for the dialogue
             // advance/skip key (DialogueAnnouncer).
         }

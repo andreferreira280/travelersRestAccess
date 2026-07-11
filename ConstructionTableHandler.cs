@@ -15,6 +15,11 @@ namespace TravellersRestAccess
         private static Vector3 _originCursorTilePos = Vector3.positiveInfinity;
         private static Vector3 _lastCursorTilePos = Vector3.positiveInfinity;
 
+        // Sub-tile positions of every floor placed via Shift+K/F8 this session. Used to apply a
+        // zone over the built floor WITHOUT needing the cursor to hover each tile (the game only
+        // highlights ZoneDisponible tiles where the cursor passes, so we track them ourselves).
+        private static readonly List<Vector2> _placedFloorTiles = new List<Vector2>();
+
         public static void Apply(HarmonyLib.Harmony harmony)
         {
             var openUI = AccessTools.Method(typeof(TavernConstructionUI), "OpenUI");
@@ -47,6 +52,7 @@ namespace TravellersRestAccess
 
                 _originCursorTilePos = Vector3.positiveInfinity;
                 _lastCursorTilePos = Vector3.positiveInfinity;
+                _placedFloorTiles.Clear();
 
                 string floorName = FloorLabel(floors?.ODFBDBLCFOM ?? TavernFloor.FirstFloor);
                 ScreenReader.Say(
@@ -66,6 +72,7 @@ namespace TravellersRestAccess
                 bool isOpen = TavernConstructionUI.IsWindowOpen();
                 if (isOpen || !_wasOpen) return;
                 _wasOpen = false;
+                ConstructionInputInjector.Abort(); // never leave injected input hanging
                 _originCursorTilePos = Vector3.positiveInfinity;
                 _lastCursorTilePos = Vector3.positiveInfinity;
 
@@ -313,7 +320,11 @@ namespace TravellersRestAccess
                 };
                 foreach (var pos in disponible)
                     foreach (var off in subOffsets)
-                        EditorGrid.KICMMMBCPNF(pos + off, EditorAction.AddFloor, decorTile);
+                    {
+                        var sub = pos + off;
+                        EditorGrid.KICMMMBCPNF(sub, EditorAction.AddFloor, decorTile);
+                        _placedFloorTiles.Add(new Vector2(sub.x, sub.y));
+                    }
 
                 // floorEditorTiles = number of real tiles (not sub-tiles)
                 var floorField = AccessTools.Field(typeof(TavernConstructionManager), "floorEditorTiles");
@@ -334,6 +345,12 @@ namespace TravellersRestAccess
                 return false;
             }
         }
+
+        // NOTE: applying a zone by calling the game's zone functions (GCFACJDLJKN and even the
+        // "safe" ChangeZone, plus the DKAECLABDNP linked-zone check) with our synthetic floor
+        // positions CRASHES the game — the zone routines rely on internal editor state that our
+        // data doesn't provide. Removed. Zone/wall/door automation would require simulating the
+        // game's real cursor+paint input instead (see docs/modules/construction-table.md).
 
         // Portuguese label for each tutorial goal.
         private static string GoalName(BuildingTutorialGoals g)
@@ -406,7 +423,8 @@ namespace TravellersRestAccess
                     case BuildingTutorialGoals.MoveWASD:
                     case BuildingTutorialGoals.PressSHIFT:
                     case BuildingTutorialGoals.ChooseRoomName:
-                        // Purely-visual/camera goals — nothing physical to build.
+                    case BuildingTutorialGoals.ChangeTavernFloor:
+                        // Camera/navigation goals — nothing physical to build.
                         BuildingTutorialManager.GoalCompleted(idx);
                         ScreenReader.Say($"{gname}: concluído.", interrupt: true);
                         break;
@@ -428,6 +446,67 @@ namespace TravellersRestAccess
             {
                 MelonLoader.MelonLogger.Error($"AdvanceTutorialStep: {ex}");
                 ScreenReader.Say("Erro ao avançar o tutorial.", interrupt: true);
+            }
+        }
+
+        // EXPERIMENT: paint the currently selected editor action over the placed floor's bounding
+        // box using simulated Interact input (ConstructionInputInjector), driving the game's own
+        // paint flow. For zones, select the crafting-zone action and dismiss the tutorial popup first.
+        private static void TestPaintInjection()
+        {
+            try
+            {
+                if (!TavernConstructionUI.IsWindowOpen()) return;
+                if (ConstructionInputInjector.Busy) { ScreenReader.Say("Aguarde, pintura em andamento.", interrupt: true); return; }
+                if (_placedFloorTiles.Count == 0) { ScreenReader.Say("Coloque o piso primeiro (F8 em Adicionar piso).", interrupt: true); return; }
+                if (BuildingTutorialManager.IKNOJDMCFOK && BuildingTutorialManager.IsOpen())
+                {
+                    ScreenReader.Say("Dispense o popup do tutorial primeiro com a seta cima, e tente de novo.", interrupt: true);
+                    return;
+                }
+
+                float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
+                foreach (var p in _placedFloorTiles)
+                {
+                    if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+                    if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+                }
+                var start = new Vector3(minX, minY, 0f);
+                var end = new Vector3(maxX, maxY, 0f);
+
+                // Select the crafting-zone action first (last test showed action=None). Setting the
+                // manager's property is the game's own selection path (fires OnEditorActionChanged).
+                try { TavernConstructionManager.GGFJGHHHEJC.CHFHMMNELGP = EditorAction.CraftingZone; } catch { }
+                EditorAction action = EditorAction.None;
+                try { action = TavernConstructionManager.GGFJGHHHEJC.CHFHMMNELGP; } catch { }
+                int panel = -1; try { panel = ConstructionActionBarUI.currentPanel; } catch { }
+                bool tutOpen = false; try { tutOpen = BuildingTutorialManager.IsOpen(); } catch { }
+                DebugLogger.LogState($"[CTH] TestPaintInjection action={action} panel={panel} tutorialOpen={tutOpen} start={start} end={end} tiles={_placedFloorTiles.Count}");
+                ScreenReader.Say("Testando pintura por input simulado.", interrupt: true);
+                ConstructionInputInjector.PaintArea(start, end, ok =>
+                {
+                    if (!ok) { ScreenReader.Say("Injetor ocupado.", interrupt: false); return; }
+                    // Verify the crafting zone actually landed on the floor tiles.
+                    bool created = false;
+                    foreach (var p in _placedFloorTiles)
+                    {
+                        try { if ((WorldGrid.AGKGGAFFFGM(p) & ZoneType.CraftingRoom) != 0) { created = true; break; } }
+                        catch { }
+                    }
+                    // Diagnostics: did the paint create editor zone tiles, and are we at the zone limit?
+                    int zoneTiles = 0, dispTiles = 0;
+                    try { foreach (var kv in EditorTileMaps.editorTiles) { if (kv.Value.editorAction == EditorAction.CraftingZone) zoneTiles++; else if (kv.Value.editorAction == EditorAction.ZoneDisponible) dispTiles++; } } catch { }
+                    int cur = -1, max = -1;
+                    try { cur = TavernZonesManager.GGFJGHHHEJC.GetCurrentNumberOfZones(ZoneType.CraftingRoom); } catch { }
+                    try { max = ReputationDBAccessor.GetMaxNumOfZones(ZoneType.CraftingRoom); } catch { }
+                    DebugLogger.LogState($"[CTH] paint result created={created} editorCraftTiles={zoneTiles} editorDispTiles={dispTiles} curZones={cur} maxZones={max}");
+                    ScreenReader.Say(created ? "Zona de produção criada!" : "Pintura enviada, mas a zona não foi criada ainda.", interrupt: true);
+                });
+            }
+            catch (Exception ex)
+            {
+                MelonLoader.MelonLogger.Error($"TestPaintInjection: {ex}");
+                ScreenReader.Say("Erro no teste de pintura.", interrupt: true);
             }
         }
 
@@ -454,38 +533,35 @@ namespace TravellersRestAccess
                 }
             }
 
-            // UpArrow = Aceitar (AcceptChanges)
-            if (Input.GetKeyDown(KeyCode.UpArrow))
+            // Tab = announce the current tutorial objective (moved off Up arrow per user request).
+            if (Input.GetKeyDown(KeyCode.Tab) && BuildingTutorialManager.IKNOJDMCFOK)
+            {
+                if (GetCurrentGoal(out int gi, out var g))
+                    ScreenReader.Say($"Objetivo atual: {GoalName(g)}. Use F8 para avançar.", interrupt: true);
+                else
+                    ScreenReader.Say("Sem objetivo pendente. Aguarde o tutorial avançar.", interrupt: true);
+            }
+
+            // UpArrow = Aceitar (AcceptChanges) — ONLY outside the tutorial. During the tutorial Up
+            // does nothing here (objective is on Tab; F8 advances).
+            if (Input.GetKeyDown(KeyCode.UpArrow) && !BuildingTutorialManager.IKNOJDMCFOK)
             {
                 try
                 {
                     var ui = TavernConstructionUI.GetInstance();
                     if (ui != null)
                     {
-                        if (BuildingTutorialManager.IKNOJDMCFOK)
+                        TavernConstructionUI.BBHJJDPJKFH();
+                        var acceptBtn = AccessTools.Field(typeof(TavernConstructionUI), "acceptButton")?.GetValue(ui) as UnityEngine.UI.Button;
+                        var acceptText = AccessTools.Field(typeof(TavernConstructionUI), "acceptButtonText")?.GetValue(ui) as TMPro.TextMeshProUGUI;
+                        string label = acceptText?.text ?? "Aceitar";
+                        if (acceptBtn != null && acceptBtn.interactable)
                         {
-                            // During the tutorial the UI Accept button is disabled by design.
-                            // Do NOT close/cancel here (that loses progress). Instead report the
-                            // current pending goal; use F8 to advance the tutorial step by step.
-                            if (GetCurrentGoal(out int gi, out var g))
-                                ScreenReader.Say($"Objetivo atual: {GoalName(g)}. Use F8 para avançar.", interrupt: true);
-                            else
-                                ScreenReader.Say("Sem objetivo pendente. Aguarde o tutorial avançar.", interrupt: true);
+                            ScreenReader.Say(label, interrupt: true);
+                            ui.AcceptChanges();
                         }
                         else
-                        {
-                            TavernConstructionUI.BBHJJDPJKFH();
-                            var acceptBtn = AccessTools.Field(typeof(TavernConstructionUI), "acceptButton")?.GetValue(ui) as UnityEngine.UI.Button;
-                            var acceptText = AccessTools.Field(typeof(TavernConstructionUI), "acceptButtonText")?.GetValue(ui) as TMPro.TextMeshProUGUI;
-                            string label = acceptText?.text ?? "Aceitar";
-                            if (acceptBtn != null && acceptBtn.interactable)
-                            {
-                                ScreenReader.Say(label, interrupt: true);
-                                ui.AcceptChanges();
-                            }
-                            else
-                                ScreenReader.Say($"{label} não disponível", interrupt: true);
-                        }
+                            ScreenReader.Say($"{label} não disponível", interrupt: true);
                     }
                 }
                 catch (Exception ex)
@@ -577,6 +653,16 @@ namespace TravellersRestAccess
             // AddFloor does real placement, other goals are announced).
             if (Input.GetKeyDown(KeyCode.F8))
                 AdvanceTutorialStep();
+
+            // F9 : EXPERIMENT — paint the currently selected action (e.g. crafting zone) over the
+            // bounding box of the placed floor, by driving the game's OWN paint flow via simulated
+            // Interact input. This uses the game's real editor state, so it should not crash like the
+            // direct zone-function calls did. Requires the tutorial popup to be minimised.
+            if (Input.GetKeyDown(KeyCode.F9))
+                TestPaintInjection();
+
+            // Advance the injection paint state machine (no-op when idle).
+            ConstructionInputInjector.Tick();
 
             CheckCursorPosition();
         }
