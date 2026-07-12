@@ -417,6 +417,13 @@ namespace TravellersRestAccess
                 // segundo"). Plain Enter still activates.
                 Activate();
             }
+            else if ((Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
+                && (Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift))
+                && topWindowNow is OrderQuestUI)
+            {
+                // Shift+Enter discards the focused ACCEPTED notice-board order (user request).
+                DiscardFocusedOrder();
+            }
             else if (Input.GetKeyDown(KeyCode.Space) && topWindowNow is YesNoDialogueUI
                 && !Input.GetKey(KeyCode.LeftControl) && !Input.GetKey(KeyCode.RightControl)
                 && !Input.GetKey(KeyCode.LeftShift) && !Input.GetKey(KeyCode.RightShift)
@@ -1822,12 +1829,39 @@ namespace TravellersRestAccess
                 // tier (rank >= 2: jovem/reserva/grande reserva). Non-ageable orders default to a
                 // low agingRank, so gating at >= 2 stops every order from mentioning aging
                 // (user: "só produtos que precisam envelhecer, tipo bebidas e queijos").
+                // The game only ENFORCES agingRank when the ordered item is actually ageable
+                // (RequiredItemQuest: needs item.canBeAged OR hasToBeAgedMeal, then rejects if the
+                // delivered aging < agingRank). Non-ageable orders (cereal bar, yogurt) carry a
+                // default agingRank=1 that the game ignores — so gate on ITEM AGEABILITY, not a rank
+                // threshold. Valid aging tiers are 0/2/3/4 (no tier 1), so a rank of 1 means "must be
+                // aged" -> round up to the first named tier (jovem). (User: vodka stopped announcing.)
                 try
                 {
                     int ar = quest.agingRank;
-                    if (ar >= 2) s += $". Requer {AgingLevelName(ar)}";
+                    bool ageable = false;
+                    try
+                    {
+                        var aitems = quest.INKJOLLEBGI();
+                        if (aitems != null && aitems.Length > 0 && aitems[0] != null)
+                        {
+                            // Match the game's own rule (RequiredItemQuest): aging applies to DRINKS
+                            // (foodType==Drink, via canBeAged) or to meals that must be aged
+                            // (hasToBeAgedMeal, e.g. cheese). canBeAged alone is useless — it defaults
+                            // TRUE on every Food, which wrongly flagged cooked meals/preserves as ageable.
+                            var food = aitems[0] as Food;
+                            bool isDrink = food != null && food.foodType == FoodType.Drink;
+                            ageable = (isDrink && food.canBeAged) || aitems[0].hasToBeAgedMeal;
+                        }
+                    }
+                    catch { }
+                    if (Main.DebugMode) DebugLogger.LogState($"Order aging: item=\"{itemName}\" agingRank={ar} ageable={ageable}");
+                    if (ageable && ar >= 1)
+                    {
+                        int needed = ar <= 2 ? 2 : ar;   // rank 1 rounds up to the first named tier
+                        s += $". Requer {AgingLevelName(needed)}";
+                    }
                 }
-                catch { }
+                catch (System.Exception e) { if (Main.DebugMode) DebugLogger.LogState($"Order aging read failed: {e.Message}"); }
 
                 // Reward: reputation + any item rewards.
                 try
@@ -2033,7 +2067,14 @@ namespace TravellersRestAccess
                     // say them WITH the coin type, skipping zeros: "custa 2 prata, 92 cobre".
                     string nm = (el.itemName != null && !string.IsNullOrWhiteSpace(el.itemName.text)) ? el.itemName.text : "Item";
                     string price = FormatShopPrice(el.moneyUI);
-                    return price != null ? $"{nm}, custa {price}" : nm;
+                    // User request: shop items have a stock count - say how many are in stock (skip
+                    // for unlimited-stock items, which have no meaningful number).
+                    string stock = null;
+                    try { if (se != null && !se.unlimited) stock = $"{se.amount} no estoque"; } catch { }
+                    var itemParts = new System.Collections.Generic.List<string> { nm };
+                    if (stock != null) itemParts.Add(stock);
+                    if (price != null) itemParts.Add($"custa {price}");
+                    return string.Join(", ", itemParts);
                 }
 
                 // Recipe row: read the DATA fields, not ticketPrice.text (that field shows the cost OR
@@ -2475,6 +2516,27 @@ namespace TravellersRestAccess
 
             string extraPart = extra.Count > 0 ? $". {string.Join(", ", extra)}" : "";
             return $"{yieldPart}Ingredientes: {string.Join("; ", parts)}. {(canCraft ? "Pode fazer" : "Faltam ingredientes")}{extraPart}";
+        }
+
+        // Shift+Enter on a focused ACCEPTED notice-board order discards it (RemoveCurrentOrder).
+        private void DiscardFocusedOrder()
+        {
+            try
+            {
+                if (_currentIndex < 0 || _currentIndex >= _items.Count) return;
+                var anchor = _items[_currentIndex].Anchor;
+                if (anchor == null) return;
+                var el = anchor.GetComponent<OrderQuestElementUI>() ?? anchor.GetComponentInParent<OrderQuestElementUI>();
+                if (el == null || el.AINAHCLIAFF == null) { ScreenReader.Say("Selecione um pedido aceito para dispensar.", interrupt: true); return; }
+                if (!el.currentQuestElement) { ScreenReader.Say("Só dá para dispensar um pedido ACEITO (este é disponível).", interrupt: true); return; }
+                string iName = null;
+                try { var its = el.AINAHCLIAFF.INKJOLLEBGI(); if (its != null && its.Length > 0) iName = its[0].IABAKHPEOAF(); } catch { }
+                try { RandomOrderQuestsManager.GGFJGHHHEJC.RemoveCurrentOrder(1, el.num); }
+                catch (System.Exception e) { MelonLoader.MelonLogger.Error($"discard order: {e}"); }
+                ScreenReader.Say($"Pedido dispensado: {iName ?? "pedido"}.", interrupt: true);
+                DebugLogger.LogInput("Shift+Enter", $"Notice board: discarded order \"{iName}\"");
+            }
+            catch (System.Exception ex) { MelonLoader.MelonLogger.Error($"DiscardFocusedOrder: {ex}"); }
         }
 
         private void Activate()

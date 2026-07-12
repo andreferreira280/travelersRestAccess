@@ -345,10 +345,22 @@ namespace TravellersRestAccess
                 // bench uses) and the guidance reflects the item the player is actually driving.
                 if (!_heldIntendedPosition.HasValue)
                 {
-                    _heldIntendedPosition = selectObj.selectedGameObject.transform.position;
-                    CursorManager.SetCursorPositionFromWorld(1, _heldIntendedPosition.Value);
+                    // User request (round 254): the grabbed decoration should start AT THE PLAYER's
+                    // position (a known reference the blind player controls), NOT wherever the game
+                    // spawned it near the wall/mouse. Seed our virtual cursor AND the object itself at
+                    // the player, so the arrows nudge it from the player's own spot. Falls back to the
+                    // spawn position if the player pos is briefly unavailable.
+                    Vector3 startPos;
+                    try { startPos = PlayerController.GetPlayerPosition(1); }
+                    catch { startPos = selectObj.selectedGameObject.transform.position; }
+                    _heldIntendedPosition = startPos;
+                    CursorManager.SetCursorPositionFromWorld(1, startPos);
                     var initPlaceable = selectObj.selectedGameObject.GetComponent<Placeable>();
-                    if (initPlaceable != null) initPlaceable.SetMouseOffset(Vector3.zero);
+                    if (initPlaceable != null)
+                    {
+                        initPlaceable.SetMouseOffset(Vector3.zero);
+                        initPlaceable.transform.position = startPos;   // guidance reads transform.position
+                    }
                 }
                 // User's explicit request to validate this for real: this fires from
                 // reading selectedGameObject directly, regardless of HOW it got set (our own

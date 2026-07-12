@@ -287,6 +287,7 @@ namespace TravellersRestAccess
             _tableArrangeHandler.Update(anyUiOpen);
             _missionDiagnosticHandler.Update();
             ConstructionTableHandler.Update();
+            HuntingHandler.Update();
             // The FuelUI (oven/malt/fermentation fuel) is owned entirely by FuelStationHandler.
             // Skip the transfer handler there so its Ctrl+Enter routing can't fire alongside the
             // fuel add (that double-handling is what scrambled the hotbar in the reverted attempts).

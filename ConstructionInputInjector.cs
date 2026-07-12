@@ -124,7 +124,10 @@ namespace TravellersRestAccess
                     Painting = true;
                     try { CursorManager.SetCursorPositionFromWorld(1, _start); } catch { }
                     InjectDown = true; InjectHeld = true;
-                    DebugLogger.LogState($"[INJ] phase1 press start={_start} interactStr=\"{InteractStr()}\"");
+                    Vector3 actual = Vector3.zero;
+                    try { actual = CursorManager.GetPlayer(1).GetCursorWorldPosition(); } catch { }
+                    // If actual != _start, the cursor couldn't reach the floor (camera not over it).
+                    DebugLogger.LogState($"[INJ] phase1 press wanted={_start} actualCursor={actual} interactStr=\"{InteractStr()}\"");
                     _phase = 2; _frames = 0;
                     break;
                 case 2: // hold the down for a couple frames (overlaps the game's Update regardless of
@@ -147,9 +150,25 @@ namespace TravellersRestAccess
                     break;
                 case 4: // release -> game applies (ApplyEditorChanges) with real state. Hold the up
                         // edge a couple frames too (timing).
+                    if (_frames == 1)
+                    {
+                        // BEFORE releasing: did the drag actually paint zone tiles? (editorTiles is
+                        // cleared on apply, so this is our only chance to see the paint result.)
+                        int ct = 0, dt = 0, other = 0;
+                        try
+                        {
+                            foreach (var kv in EditorTileMaps.editorTiles)
+                            {
+                                if (kv.Value.editorAction == EditorAction.CraftingZone) ct++;
+                                else if (kv.Value.editorAction == EditorAction.ZoneDisponible) dt++;
+                                else other++;
+                            }
+                        }
+                        catch { }
+                        DebugLogger.LogState($"[INJ] phase4 preRelease editorCraftTiles={ct} editorDispTiles={dt} otherTiles={other} end={_end}");
+                    }
                     InjectHeld = false; InjectUp = true;
-                    if (_frames == 1) DebugLogger.LogState($"[INJ] phase4 release end={_end}");
-                    if (_frames >= 2) { _phase = 5; _frames = 0; }
+                    if (_frames >= 3) { _phase = 5; _frames = 0; }
                     break;
                 case 5: // clear up edge, finish
                     InjectUp = false; Painting = false;

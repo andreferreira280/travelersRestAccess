@@ -277,32 +277,31 @@ namespace TravellersRestAccess
         // Returns true if at least one floor tile was actually placed.
         private static bool AutoPlaceAll()
         {
+            int placed = PlaceCurrentDisponibleRing(out string err);
+            if (err != null) { ScreenReader.Say(err, interrupt: true); return false; }
+            if (placed <= 0) { ScreenReader.Say("Nenhuma área disponível para construir.", interrupt: true); return false; }
+            try { TavernConstructionUI.BBHJJDPJKFH(); } catch { }
+            ScreenReader.Say($"{placed} pisos colocados.", interrupt: true);
+            return true;
+        }
+
+        // Places the current AddFloorDisponible (green) frontier as real floor and applies it. Returns
+        // the number of full tiles placed this call (0 if none available). Hard failures go to err.
+        private static int PlaceCurrentDisponibleRing(out string err)
+        {
+            err = null;
             try
             {
                 var mgr = TavernConstructionManager.GGFJGHHHEJC;
-                if (mgr == null) { ScreenReader.Say("Mesa de construção não ativa.", interrupt: true); return false; }
-
+                if (mgr == null) { err = "Mesa de construção não ativa."; return 0; }
                 if (mgr.CHFHMMNELGP != EditorAction.AddFloor || ConstructionActionBarUI.currentPanel != 0)
-                {
-                    ScreenReader.Say("Selecione 'Adicionar piso' primeiro.", interrupt: true);
-                    return false;
-                }
+                { err = "Selecione 'Adicionar piso' primeiro."; return 0; }
 
-                // Collect available (green) tile positions — copy before modifying
                 var disponible = new List<Vector3>();
                 foreach (var kv in EditorTileMaps.editorTiles)
-                {
-                    if (kv.Value.editorAction == EditorAction.AddFloorDisponible)
-                        disponible.Add(kv.Key);
-                }
+                    if (kv.Value.editorAction == EditorAction.AddFloorDisponible) disponible.Add(kv.Key);
+                if (disponible.Count == 0) return 0;
 
-                if (disponible.Count == 0)
-                {
-                    ScreenReader.Say("Nenhuma área disponível para construir.", interrupt: true);
-                    return false;
-                }
-
-                // Ensure _decorationTile is set
                 var decorField = AccessTools.Field(typeof(TavernConstructionManager), "_decorationTile");
                 var decorTile = decorField?.GetValue(mgr) as DecorationTile;
                 if (decorTile == null)
@@ -310,14 +309,7 @@ namespace TravellersRestAccess
                     decorTile = Utils.KMJAGBLPODO(ConstructionFloors.GGFJGHHHEJC?.ODFBDBLCFOM ?? TavernFloor.FirstFloor);
                     decorField?.SetValue(mgr, decorTile);
                 }
-
-                // Convert each disponible position to AddFloor with 4 sub-tile entries
-                var subOffsets = new Vector3[] {
-                    Vector3.zero,
-                    new Vector3(0.5f, 0f, 0f),
-                    new Vector3(0f, 0.5f, 0f),
-                    new Vector3(0.5f, 0.5f, 0f)
-                };
+                var subOffsets = new Vector3[] { Vector3.zero, new Vector3(0.5f, 0f, 0f), new Vector3(0f, 0.5f, 0f), new Vector3(0.5f, 0.5f, 0f) };
                 foreach (var pos in disponible)
                     foreach (var off in subOffsets)
                     {
@@ -325,24 +317,55 @@ namespace TravellersRestAccess
                         EditorGrid.KICMMMBCPNF(sub, EditorAction.AddFloor, decorTile);
                         _placedFloorTiles.Add(new Vector2(sub.x, sub.y));
                     }
-
-                // floorEditorTiles = number of real tiles (not sub-tiles)
                 var floorField = AccessTools.Field(typeof(TavernConstructionManager), "floorEditorTiles");
-                floorField?.SetValue(mgr, disponible.Count);
-
+                floorField?.SetValue(mgr, _placedFloorTiles.Count / 4);
                 mgr.ApplyEditorChanges();
-
-                // Refresh button interactability immediately; normally only updated on panel changes.
-                TavernConstructionUI.BBHJJDPJKFH();
-
-                ScreenReader.Say($"{disponible.Count} pisos colocados.", interrupt: true);
-                return true;
+                return disponible.Count;
             }
             catch (Exception ex)
             {
-                ScreenReader.Say("Erro ao colocar piso.", interrupt: true);
-                MelonLoader.MelonLogger.Error($"AutoPlaceAll: {ex}");
-                return false;
+                MelonLoader.MelonLogger.Error($"PlaceCurrentDisponibleRing: {ex}");
+                err = "Erro ao colocar piso.";
+                return 0;
+            }
+        }
+
+        // Multi-frame floor expander. The game recomputes the green "disponible" frontier on its OWN
+        // Update after each ApplyEditorChanges, so a single press only got the current ring (~4 tiles).
+        // This places ONE ring per frame and waits, growing the floor until it reaches targetTiles (or
+        // the buildable area runs out). Fixes "só 4 telhas" — a crafting zone needs >= 9 (3x3).
+        private static bool _expandActive;
+        private static int _expandTarget;
+        private static int _expandGoalIdx = -1;
+        private static int _expandNoGrowth;
+
+        private static void StartFloorExpansion(int targetTiles, int goalIdx)
+        {
+            if (_expandActive) return;
+            _expandActive = true;
+            _expandTarget = targetTiles;
+            _expandGoalIdx = goalIdx;
+            _expandNoGrowth = 0;
+            ScreenReader.Say("Colocando piso...", interrupt: true);
+        }
+
+        private static void TickFloorExpansion()
+        {
+            if (!_expandActive) return;
+            int placed = PlaceCurrentDisponibleRing(out string err);
+            if (err != null) { _expandActive = false; ScreenReader.Say(err, interrupt: true); return; }
+
+            if (placed <= 0) _expandNoGrowth++; else _expandNoGrowth = 0;
+            int distinct = _placedFloorTiles.Count / 4;
+
+            if (distinct >= _expandTarget || _expandNoGrowth >= 3)
+            {
+                _expandActive = false;
+                try { TavernConstructionUI.BBHJJDPJKFH(); } catch { }
+                ScreenReader.Say($"{distinct} telhas de piso colocadas.", interrupt: true);
+                if (distinct > 0 && _expandGoalIdx >= 0)
+                    try { BuildingTutorialManager.GoalCompleted(_expandGoalIdx); } catch { }
+                _expandGoalIdx = -1;
             }
         }
 
@@ -430,10 +453,9 @@ namespace TravellersRestAccess
                         break;
 
                     case BuildingTutorialGoals.AddFloor:
-                        // Real construction: place the highlighted floor tiles.
-                        if (AutoPlaceAll())
-                            BuildingTutorialManager.GoalCompleted(idx);
-                        // AutoPlaceAll already announces success/why-not.
+                        // Real construction: grow the floor over several frames up to ~4x4 (16 tiles),
+                        // so a crafting zone (min 3x3) fits. Completes the goal when done.
+                        StartFloorExpansion(16, idx);
                         break;
 
                     default:
@@ -452,6 +474,179 @@ namespace TravellersRestAccess
         // EXPERIMENT: paint the currently selected editor action over the placed floor's bounding
         // box using simulated Interact input (ConstructionInputInjector), driving the game's own
         // paint flow. For zones, select the crafting-zone action and dismiss the tutorial popup first.
+        // --- Construction toolbar navigation by keyboard (user request round 263). ] / [ move between
+        // the tabs; Left/Right arrows move between the options in the current tab. Everything is spoken. ---
+        private static readonly string[] _panelNames = { "Construir", "Personalizar", "Zonas", "Portas" };
+        private static readonly System.Reflection.FieldInfo _panelListField =
+            AccessTools.Field(typeof(ConstructionActionBarUI), "panelList");
+        // The tutorial's designated (paintable) tiles — the game blocks painting anywhere else while
+        // the tutorial is active (EditorGrid.FBJHIJNIOGH:413 -> BPBIDHBIBHD -> HDENCBCBGCM.Contains).
+        private static readonly System.Reflection.FieldInfo _tutorialTilesField =
+            AccessTools.Field(typeof(EditorGrid), "HDENCBCBGCM");
+
+        private static System.Collections.Generic.List<Vector2> TutorialAllowedTiles()
+        {
+            try { return _tutorialTilesField?.GetValue(null) as System.Collections.Generic.List<Vector2>; }
+            catch { return null; }
+        }
+        private static readonly System.Reflection.FieldInfo _panelButtonsField =
+            AccessTools.Field(typeof(ConstructionActionBarUI), "panelButtons");
+        private static readonly System.Reflection.FieldInfo _panelEnabledField =
+            AccessTools.Field(typeof(ConstructionActionBarUI), "JKMCDBDAICA");
+
+        // Which tabs are currently ENABLED (the game gates them by state; a disabled tab can't be
+        // focused - FocusMainPanel silently falls back to tab 0). Logged so we can see the truth.
+        private static bool[] PanelEnabled()
+        {
+            try { return _panelEnabledField?.GetValue(ConstructionActionBarUI.GetInstance()) as bool[]; }
+            catch { return null; }
+        }
+
+        private static string PanelName(int p) => (p >= 0 && p < _panelNames.Length) ? _panelNames[p] : $"guia {p}";
+
+        private static string ActionNamePt(EditorAction a)
+        {
+            switch (a)
+            {
+                case EditorAction.None: return "nada selecionado";
+                case EditorAction.AddFloor: return "Adicionar piso";
+                case EditorAction.RemoveFloor: return "Remover piso";
+                case EditorAction.DiningZone: return "Zona de refeição";
+                case EditorAction.CraftingZone: return "Zona de produção";
+                case EditorAction.RoomZone: return "Zona de quarto";
+                case EditorAction.RemoveZone: return "Remover zona";
+                case EditorAction.ChangeDecoFloor: return "Piso decorativo";
+                case EditorAction.ChangeDecoWall: return "Parede decorativa";
+                case EditorAction.ChangeDecoWallTrim: return "Acabamento de parede";
+                case EditorAction.ChangeRoof: return "Telhado";
+                case EditorAction.CreateDoor: return "Criar porta";
+                case EditorAction.CreateRentedRoomDoor: return "Porta de quarto alugado";
+                case EditorAction.CreateStairsUp: return "Escada para cima";
+                case EditorAction.CreateStairsDown: return "Escada para baixo";
+                case EditorAction.CreateCellarDoorDown: return "Porta de adega, descer";
+                case EditorAction.CreateCellarDoorUp: return "Porta de adega, subir";
+                case EditorAction.RemoveAccess: return "Remover acesso";
+                case EditorAction.CreateBarn: return "Criar celeiro";
+                case EditorAction.CreateChickenHouse: return "Criar galinheiro";
+                default: return a.ToString();
+            }
+        }
+
+        private static int CurrentPanelSlotCount()
+        {
+            try
+            {
+                try { ConstructionActionBarUI.OPPJACDGOAF(); } catch { }   // refreshes panelList to currentPanel
+                var list = _panelListField?.GetValue(ConstructionActionBarUI.GetInstance()) as System.Collections.ICollection;
+                return list?.Count ?? 0;
+            }
+            catch { return 0; }
+        }
+
+        private static void AnnounceToolbarSelection(bool withPanel)
+        {
+            int p = -1; try { p = ConstructionActionBarUI.currentPanel; } catch { }
+            EditorAction a = EditorAction.None; try { a = TavernConstructionManager.GGFJGHHHEJC.CHFHMMNELGP; } catch { }
+            ScreenReader.Say(withPanel ? $"Guia {PanelName(p)}. {ActionNamePt(a)}" : ActionNamePt(a), interrupt: true);
+        }
+
+        private static void ChangeToolbarPanel(int dir)
+        {
+            try
+            {
+                int cur = ConstructionActionBarUI.currentPanel;
+                var enabled = PanelEnabled();
+                // Step to the next ENABLED tab in the chosen direction (skip disabled ones), so ]
+                // actually reaches Zonas even if Personalizar between is off.
+                int next = cur;
+                for (int step = 0; step < 4; step++)
+                {
+                    next = ((next + dir) % 4 + 4) % 4;
+                    if (enabled == null || (next < enabled.Length && enabled[next])) break;
+                }
+
+                if (Main.DebugMode)
+                {
+                    string en = enabled != null ? string.Join(",", System.Array.ConvertAll(enabled, b => b ? "1" : "0")) : "null";
+                    DebugLogger.LogState($"[CTH] panel nav: cur={cur} -> next={next} enabled=[{en}]");
+                }
+
+                // Prefer a REAL button click (does the game's full switch: enable/rebuild slots). Fall
+                // back to FocusMainPanel if the button isn't reachable.
+                bool clicked = false;
+                try
+                {
+                    var btns = _panelButtonsField?.GetValue(ConstructionActionBarUI.GetInstance()) as UnityEngine.UI.Button[];
+                    if (btns != null && next >= 0 && next < btns.Length && btns[next] != null)
+                    {
+                        btns[next].onClick.Invoke();
+                        clicked = true;
+                    }
+                }
+                catch { }
+                if (!clicked) { try { ConstructionActionBarUI.FocusMainPanel(next); } catch { } }
+
+                // Land on the FIRST REAL option (skip a slot 0 that maps to None, which read as "nada
+                // selecionado"). SetCurrentSlotSelected updates the manager action, so we can detect it.
+                int cnt = CurrentPanelSlotCount();
+                for (int s = 0; s < System.Math.Max(1, cnt); s++)
+                {
+                    try { ConstructionActionBarUI.SetCurrentSlotSelected(s); } catch { }
+                    EditorAction a = EditorAction.None; try { a = TavernConstructionManager.GGFJGHHHEJC.CHFHMMNELGP; } catch { }
+                    if (a != EditorAction.None) break;
+                }
+                int now = -1; try { now = ConstructionActionBarUI.currentPanel; } catch { }
+                if (Main.DebugMode) DebugLogger.LogState($"[CTH] panel nav result: currentPanel={now} clicked={clicked}");
+                AnnounceToolbarSelection(true);
+            }
+            catch (Exception e) { MelonLoader.MelonLogger.Error($"ChangeToolbarPanel: {e}"); }
+        }
+
+        private static void ChangeToolbarSlot(int dir)
+        {
+            try
+            {
+                int cur = ConstructionActionBarUI.currentSlotSelected;
+                int count = CurrentPanelSlotCount();
+                if (count <= 0) count = 8;
+                int next = cur + dir;
+                if (next < 0) next = 0;
+                if (next >= count) next = count - 1;
+                ConstructionActionBarUI.SetCurrentSlotSelected(next);
+                AnnounceToolbarSelection(false);
+            }
+            catch (Exception e) { MelonLoader.MelonLogger.Error($"ChangeToolbarSlot: {e}"); }
+        }
+
+        // Selects the ZONES panel (2) and the crafting-zone slot in the construction toolbar, the same
+        // way the game's own keyboard/gamepad navigation does, so the area-paint (which reads
+        // currentPanel + currentSlotSelected) paints a crafting zone. Guarded + logged so a failure is
+        // visible without crashing. Returns true once the manager's action reads CraftingZone.
+        private static bool SelectCraftingZoneInToolbar()
+        {
+            try
+            {
+                try { ConstructionActionBarUI.FocusMainPanel(2); } catch { }
+                int panelNow = -1;
+                try { panelNow = ConstructionActionBarUI.currentPanel; } catch { }
+                if (panelNow != 2)
+                {
+                    DebugLogger.LogState($"[CTH] zones panel (2) not reachable; currentPanel={panelNow}");
+                    return false;
+                }
+                for (int slot = 0; slot < 12; slot++)
+                {
+                    try { ConstructionActionBarUI.SetCurrentSlotSelected(slot); } catch { }
+                    EditorAction a = EditorAction.None;
+                    try { a = TavernConstructionManager.GGFJGHHHEJC.CHFHMMNELGP; } catch { }
+                    if (Main.DebugMode) DebugLogger.LogState($"[CTH] zones slot {slot} -> action {a}");
+                    if (a == EditorAction.CraftingZone) return true;
+                }
+                return false;
+            }
+            catch (Exception e) { MelonLoader.MelonLogger.Error($"SelectCraftingZoneInToolbar: {e}"); return false; }
+        }
+
         private static void TestPaintInjection()
         {
             try
@@ -465,8 +660,21 @@ namespace TravellersRestAccess
                     return;
                 }
 
+                // During the tutorial the game ONLY lets you paint on its DESIGNATED tiles
+                // (EditorGrid.HDENCBCBGCM — confirmed at EditorGrid.FBJHIJNIOGH:413). Our floor expander
+                // may have grown beyond that, so a zone painted over the whole floor gets rejected tile
+                // by tile. When the tutorial is active, paint over the tutorial's allowed area instead.
+                var area = _placedFloorTiles;
+                bool tut = false; try { tut = BuildingTutorialManager.IKNOJDMCFOK; } catch { }
+                var allowed = TutorialAllowedTiles();
+                if (tut && allowed != null && allowed.Count > 0)
+                {
+                    area = allowed;
+                    DebugLogger.LogState($"[CTH] tutorial active: painting zone over {allowed.Count} tutorial-allowed tiles (not the {_placedFloorTiles.Count} floor tiles)");
+                }
+
                 float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
-                foreach (var p in _placedFloorTiles)
+                foreach (var p in area)
                 {
                     if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
                     if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
@@ -474,34 +682,56 @@ namespace TravellersRestAccess
                 var start = new Vector3(minX, minY, 0f);
                 var end = new Vector3(maxX, maxY, 0f);
 
-                // Select the crafting-zone action first (last test showed action=None). Setting the
-                // manager's property is the game's own selection path (fires OnEditorActionChanged).
+                // The game's area-paint reads the ACTION BAR (currentPanel + selected slot), NOT the
+                // manager property — confirmed by the log (panel=0/floor while we only set the property,
+                // so it painted nothing). Select the ZONES panel (2) + the crafting-zone slot the way
+                // the game does, so the drag actually paints a crafting zone. Keep the property set too.
+                bool zoneSelected = SelectCraftingZoneInToolbar();
                 try { TavernConstructionManager.GGFJGHHHEJC.CHFHMMNELGP = EditorAction.CraftingZone; } catch { }
+                if (!zoneSelected) DebugLogger.LogState("[CTH] WARNING: could not select crafting-zone slot in the zones panel");
                 EditorAction action = EditorAction.None;
                 try { action = TavernConstructionManager.GGFJGHHHEJC.CHFHMMNELGP; } catch { }
                 int panel = -1; try { panel = ConstructionActionBarUI.currentPanel; } catch { }
                 bool tutOpen = false; try { tutOpen = BuildingTutorialManager.IsOpen(); } catch { }
                 DebugLogger.LogState($"[CTH] TestPaintInjection action={action} panel={panel} tutorialOpen={tutOpen} start={start} end={end} tiles={_placedFloorTiles.Count}");
-                ScreenReader.Say("Testando pintura por input simulado.", interrupt: true);
-                ConstructionInputInjector.PaintArea(start, end, ok =>
+
+                // Where is the existing crafting zone vs our floor? (adjacency decides if the paint
+                // can LINK/extend instead of creating a new zone, which the 1/1 limit forbids.)
+                try
                 {
-                    if (!ok) { ScreenReader.Say("Injetor ocupado.", interrupt: false); return; }
-                    // Verify the crafting zone actually landed on the floor tiles.
-                    bool created = false;
-                    foreach (var p in _placedFloorTiles)
-                    {
-                        try { if ((WorldGrid.AGKGGAFFFGM(p) & ZoneType.CraftingRoom) != 0) { created = true; break; } }
-                        catch { }
-                    }
-                    // Diagnostics: did the paint create editor zone tiles, and are we at the zone limit?
-                    int zoneTiles = 0, dispTiles = 0;
-                    try { foreach (var kv in EditorTileMaps.editorTiles) { if (kv.Value.editorAction == EditorAction.CraftingZone) zoneTiles++; else if (kv.Value.editorAction == EditorAction.ZoneDisponible) dispTiles++; } } catch { }
-                    int cur = -1, max = -1;
-                    try { cur = TavernZonesManager.GGFJGHHHEJC.GetCurrentNumberOfZones(ZoneType.CraftingRoom); } catch { }
-                    try { max = ReputationDBAccessor.GetMaxNumOfZones(ZoneType.CraftingRoom); } catch { }
-                    DebugLogger.LogState($"[CTH] paint result created={created} editorCraftTiles={zoneTiles} editorDispTiles={dispTiles} curZones={cur} maxZones={max}");
-                    ScreenReader.Say(created ? "Zona de produção criada!" : "Pintura enviada, mas a zona não foi criada ainda.", interrupt: true);
-                });
+                    var zones = TavernZonesManager.GGFJGHHHEJC.GetTavernZonesOfType(ZoneType.CraftingRoom);
+                    if (zones != null && zones.Count > 0 && zones[0].positions != null && zones[0].positions.Count > 0)
+                        DebugLogger.LogState($"[CTH] existing craftZone: zones={zones.Count} tiles={zones[0].positions.Count} firstPos={zones[0].positions[0]}");
+                    else
+                        DebugLogger.LogState("[CTH] existing craftZone: none");
+                    if (_placedFloorTiles.Count > 0)
+                        DebugLogger.LogState($"[CTH] floorFirst={_placedFloorTiles[0]} floorLast={_placedFloorTiles[_placedFloorTiles.Count - 1]}");
+                }
+                catch { }
+                // Use the game's OWN zone-creation function directly (user's hunch — "vai ser change
+                // zone mesmo"): EditorTileMaps.ChangeZone(action, positions, true) computes the ZoneType,
+                // checks linking/breaking, then CreateTavernZone + AddTileToExistingZone. This bypasses
+                // the injection drag AND the editor-tile path (both gave 0), and the tutorial paint
+                // restriction. maxZones=2 now, so a 2nd crafting zone is allowed.
+                ScreenReader.Say("Aplicando zona de produção.", interrupt: true);
+                bool zoneOk = false;
+                try { zoneOk = EditorTileMaps.ChangeZone(EditorAction.CraftingZone, new System.Collections.Generic.List<Vector2>(area), true); }
+                catch (Exception e) { MelonLoader.MelonLogger.Error($"ChangeZone: {e}"); }
+                DebugLogger.LogState($"[CTH] ChangeZone returned {zoneOk} for {area.Count} tiles");
+
+                bool created = false;
+                foreach (var t in area)
+                {
+                    try { if ((WorldGrid.AGKGGAFFFGM(new Vector3(t.x, t.y, 0f)) & ZoneType.CraftingRoom) != 0) { created = true; break; } }
+                    catch { }
+                }
+                int zoneTiles = 0, dispTiles = 0;
+                try { foreach (var kv in EditorTileMaps.editorTiles) { if (kv.Value.editorAction == EditorAction.CraftingZone) zoneTiles++; else if (kv.Value.editorAction == EditorAction.ZoneDisponible) dispTiles++; } } catch { }
+                int curZ = -1, maxZ = -1;
+                try { curZ = TavernZonesManager.GGFJGHHHEJC.GetCurrentNumberOfZones(ZoneType.CraftingRoom); } catch { }
+                try { maxZ = ReputationDBAccessor.GetMaxNumOfZones(ZoneType.CraftingRoom); } catch { }
+                DebugLogger.LogState($"[CTH] ChangeZone result: created={created} editorCraftTiles={zoneTiles} editorDispTiles={dispTiles} curZones={curZ} maxZones={maxZ}");
+                ScreenReader.Say(created ? "Zona de produção criada!" : "Ainda não aplicou. Vou ver o log.", interrupt: true);
             }
             catch (Exception ex)
             {
@@ -619,12 +849,12 @@ namespace TravellersRestAccess
                 }
             }
 
-            // ] : cycle panels
-            if (Input.GetKeyDown(KeyCode.RightBracket))
-            {
-                int next = (ConstructionActionBarUI.currentPanel + 1) % 4;
-                try { ConstructionActionBarUI.FocusMainPanel(next); } catch { }
-            }
+            // ] / [ : navigate construction TABS (guias: Construir, Personalizar, Zonas, Portas).
+            // Left/Right arrows: options within the current tab. (User request round 263.)
+            if (Input.GetKeyDown(KeyCode.RightBracket)) ChangeToolbarPanel(+1);
+            if (Input.GetKeyDown(KeyCode.LeftBracket)) ChangeToolbarPanel(-1);
+            if (Input.GetKeyDown(KeyCode.RightArrow)) ChangeToolbarSlot(+1);
+            if (Input.GetKeyDown(KeyCode.LeftArrow)) ChangeToolbarSlot(-1);
 
             // J : announce current column
             if (Input.GetKeyDown(KeyCode.J) && _lastCursorTilePos.x != float.PositiveInfinity)
@@ -663,6 +893,7 @@ namespace TravellersRestAccess
 
             // Advance the injection paint state machine (no-op when idle).
             ConstructionInputInjector.Tick();
+            TickFloorExpansion();
 
             CheckCursorPosition();
         }

@@ -49,24 +49,48 @@ namespace TravellersRestAccess
                 if (WorldNavigationHandler.AnyTerrainUpdating()) return;
 
                 var item = PlayerInventory.GetPlayer(1)?.actionBarInventory?.GetSelectedItem();
-                if (!(item is Hoe || item is Spade || item is WateringCan || item is Seed)) return;
-
                 var player = PlayerController.GetPlayer(1);
                 if (player == null) return;
 
-                // Aim at the tile the GAME actually marks diggable (its "blue square" cluster around
-                // the player), NOT blindly at the facing tile. LOG PROOF (round 146): the facing tile
-                // often has NO blue square while the own cell / a neighbour does, so a fixed facing
-                // aim just missed. ChosenToolTile picks the facing tile if diggable, else the nearest
-                // diggable tile. This is what makes the tools finally act reliably.
-                Vector3 aim = WorldNavigationHandler.ChosenToolTile();
-                aim.z = 0f;
-                __result = aim;
-
-                if (Main.DebugMode && Time.unscaledTime - _lastLogTime > 0.5f)
+                // TILE tools (hoe/spade/watering/seed) act on a grid tile: aim at the tile the GAME
+                // actually marks diggable (its "blue square" cluster around the player), NOT blindly at
+                // the facing tile. LOG PROOF (round 146): the facing tile often has NO blue square while
+                // the own cell / a neighbour does, so a fixed facing aim just missed. ChosenToolTile
+                // picks the facing tile if diggable, else the nearest diggable tile.
+                if (item is Hoe || item is Spade || item is WateringCan || item is Seed)
                 {
-                    _lastLogTime = Time.unscaledTime;
-                    DebugLogger.LogState($"ToolCursorAim: tool={item.GetType().Name} facing={player.characterAnimation.FCGBJEIIMBC} aim={aim}");
+                    Vector3 aim = WorldNavigationHandler.ChosenToolTile();
+                    aim.z = 0f;
+                    __result = aim;
+                    if (Main.DebugMode && Time.unscaledTime - _lastLogTime > 0.5f)
+                    {
+                        _lastLogTime = Time.unscaledTime;
+                        DebugLogger.LogState($"ToolCursorAim: tool={item.GetType().Name} facing={player.characterAnimation.FCGBJEIIMBC} aim={aim}");
+                    }
+                    return;
+                }
+
+                // OBJECT tools (axe->tree, pick->rock) act on the object the swing's hit-collider lands
+                // on. In keyboard mode the mouse never moves, so the swing landed on empty ground ("nada
+                // para cortar" even though a tree is right there). Aim the cursor at the proximity-FOCUSED
+                // tree/rock so the swing connects. Only kicks in when such an object is focused, so it
+                // can't disturb anything else. (User: "falava árvore mas dizia nada para cortar".)
+                if (item is Ax || item is Pick)
+                {
+                    var go = InputByProximityManager.GetPlayer(1)?.GetCurrentFocusedInputElement()?.mainGameObject;
+                    if (go == null) return;
+                    var tree = go.GetComponent<Tree>() ?? go.GetComponentInParent<Tree>();
+                    var rock = go.GetComponent<Rock>() ?? go.GetComponentInParent<Rock>();
+                    Transform t = tree != null ? tree.transform : (rock != null ? rock.transform : null);
+                    if (t == null) return;
+                    Vector3 aim = t.position;
+                    aim.z = 0f;
+                    __result = aim;
+                    if (Main.DebugMode && Time.unscaledTime - _lastLogTime > 0.5f)
+                    {
+                        _lastLogTime = Time.unscaledTime;
+                        DebugLogger.LogState($"ToolCursorAim: tool={item.GetType().Name} focused={go.name} aim={aim}");
+                    }
                 }
             }
             catch { }

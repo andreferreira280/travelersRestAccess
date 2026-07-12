@@ -46,7 +46,7 @@ namespace TravellersRestAccess
         // request, and a new "Repositivos" category for placed consumables that are working but
         // will need restocking (candles). Associated benches leave "Pendentes" automatically (see
         // BuildTargetList - only unassociated benches are listed now).
-        private static readonly string[] CategoryOrder = { "Servir", "Portas", "Comerciantes", "NPCs", "Animais", "Caça", "Pendentes", "Repositivos", "Containers", "Máquinas", "Cultivo", "Materiais", "Coletáveis", "Decorativos" };
+        private static readonly string[] CategoryOrder = { "Servir", "Portas", "Comerciantes", "NPCs", "Animais", "Caça", "Pendentes", "Repositivos", "Containers", "Dispensadores", "Máquinas", "Cultivo", "Materiais", "Coletáveis", "Decorativos" };
 
         // The town/region merchants and what each sells (from the wiki, provided by the user). Used to
         // put them in their own "Comerciantes" category (out of "NPCs") with a description, and to let
@@ -299,12 +299,19 @@ namespace TravellersRestAccess
             CustomSounds.UiOpen = anyUiOpen;
             CustomSounds.UpdateConversationMute();
 
+            // DEV teleport menu (F11): while open it OWNS the arrows/Enter/Escape, so swallow all
+            // other world input this frame to avoid conflicts.
+            if (_teleportMenuOpen) { HandleTeleportMenuOpen(); return; }
+
             HandleTutorialHelpKey();
             HandleTavernOpenClose();
             HandleQuickSave();
             HandleInfoKey();
             HandleReputationKey();
             HandleMoneyGainAnnouncement();
+            HandleTavernHourReminder();
+            HandleCandleAnnouncements();
+            HandleDevKeys();
             EnsureObjectiveHook();
 
             // While ANY area is still building its terrain (initial load OR an area transition),
@@ -836,7 +843,12 @@ namespace TravellersRestAccess
                 _currentPath = null;
                 _simplifiedSteps = null;
                 _currentStepIndex = 0;
-                if (Main.DebugMode) DebugLogger.LogState("WorldNav: Pathfinding returned no route");
+                if (Main.DebugMode)
+                {
+                    Location _pl = PlayerController.GetPlayer(1)?.LEOIMFNKFGA ?? Location.None;
+                    Location _tl = Utils.HJPCBBGHPDA(_lastRequestTo);
+                    DebugLogger.LogState($"WorldNav: Pathfinding returned no route. target=\"{_selectedTarget?.name}\" from={_lastRequestFrom} to={_lastRequestTo} playerLoc={_pl} targetLoc={_tl}");
+                }
 
                 // Nudge retry: the last tile of a closed door is sometimes blocked; backing
                 // off one tile toward the player usually lands on a walkable spot.
@@ -875,7 +887,17 @@ namespace TravellersRestAccess
                 }
 
                 _lastPathFailed = true;
-                if (wasInitial) ScreenReader.Say("Não encontrei uma rota até lá. Pode estar bloqueado.", interrupt: true);
+                if (wasInitial)
+                {
+                    // Even when A* can't reach the goal (e.g. a merchant behind a counter, or an
+                    // unwalkable approach tile), give the STRAIGHT-LINE bearing + distance so the
+                    // player can still head that way manually instead of hearing a dead end.
+                    // (User: routing to the merchants Bob/Chuck said only "não tem rota".)
+                    Vector3 pPos = PlayerController.GetPlayerPosition(1);
+                    Vector3 delta = _lastRequestTo - pPos;
+                    int tiles = Mathf.Max(1, Mathf.RoundToInt(delta.magnitude / TileSize));
+                    ScreenReader.Say($"Não achei uma rota exata. Em linha reta fica {Direction8(delta)}, uns {tiles} passos. Pode ter algo bloqueando.", interrupt: true);
+                }
                 return;
             }
 
@@ -1947,12 +1969,235 @@ namespace TravellersRestAccess
             {
                 var d = WorldTime.NOAOJJLNHJJ;
                 parts.Add($"{d.hour}:{d.min:00}");
+                // User wants the day NUMBER and WHICH day it is, not just the season.
+                // DKGMLALMDEH() = day-of-season index (1..28: week*7 + dayOfWeek + 1).
+                parts.Add($"Dia {d.DKGMLALMDEH()}, {DayPt(d.day)}");
                 parts.Add(SeasonPt(d.season));
             }
             catch { }
             try { parts.Add(LocationPt(PlayerController.GetPlayer(1).LEOIMFNKFGA)); }
             catch { }
             if (parts.Count > 0) ScreenReader.Announce(string.Join(". ", parts));
+        }
+
+        // --- Tavern evening reminder (user: at 19:00 speak the hour so I remember to light the
+        // fireplace). Only inside the tavern. Edge-triggered on the hour becoming 19, reset after. ---
+        private int _lastHourReminder = -1;
+        private void HandleTavernHourReminder()
+        {
+            Location loc;
+            int hour;
+            try { loc = PlayerController.GetPlayer(1).LEOIMFNKFGA; hour = WorldTime.NOAOJJLNHJJ.hour; }
+            catch { return; }
+            if (loc != Location.Tavern) return;
+            if (hour == 19 && _lastHourReminder != 19)
+            {
+                _lastHourReminder = 19;
+                ScreenReader.Announce("19 horas");
+            }
+            else if (hour != 19 && _lastHourReminder == 19)
+            {
+                _lastHourReminder = -1;   // re-arm for the next day
+            }
+        }
+
+        // --- Candle warnings in the tavern (user request): warn when a candle drops to ~25% ("está
+        // acabando"), when one goes out, and — on ENTERING the tavern with candles present but none
+        // lit — that there are no lit candles on the tables. Candles are Placeables carrying a Crafter
+        // whose fuel (LCCABPFHCOL) burns down; spent = fuel <= 1 (the game's own threshold). There is
+        // no static max fuel, so we track each candle's PEAK fuel (freshly lit / refuelled) and take
+        // the percentage against that. ---
+        private readonly System.Collections.Generic.Dictionary<int, int> _candlePeakFuel = new System.Collections.Generic.Dictionary<int, int>();
+        private readonly System.Collections.Generic.HashSet<int> _candleLowAnnounced = new System.Collections.Generic.HashSet<int>();
+        private readonly System.Collections.Generic.HashSet<int> _candleOutAnnounced = new System.Collections.Generic.HashSet<int>();
+        private Location _lastCandleLocation = Location.None;
+        private float _candleEnterCheckTime = -1f;   // delayed check so the candle cache is fresh after entering
+
+        private void HandleCandleAnnouncements()
+        {
+            Location loc;
+            try { loc = PlayerController.GetPlayer(1).LEOIMFNKFGA; }
+            catch { return; }
+
+            // Entering the tavern: schedule a delayed "no lit candles" check (the placeable cache
+            // refreshes a few frames after an area change, so checking on the exact edge is unreliable).
+            if (loc == Location.Tavern && _lastCandleLocation != Location.Tavern)
+                _candleEnterCheckTime = Time.unscaledTime + 2f;
+            _lastCandleLocation = loc;
+
+            if (loc != Location.Tavern) return;
+
+            int candleCount = 0, litCount = 0;
+            foreach (var candle in _cachedCandles)
+            {
+                if (candle == null) continue;
+                var crafter = candle.GetComponent<Crafter>() ?? candle.GetComponentInChildren<Crafter>();
+                if (crafter == null) continue;
+                candleCount++;
+                int id = candle.gameObject.GetInstanceID();
+                int fuel = crafter.LCCABPFHCOL;
+
+                int peak;
+                if (!_candlePeakFuel.TryGetValue(id, out peak) || fuel > peak) { peak = fuel; _candlePeakFuel[id] = peak; }
+
+                bool spent = fuel <= 1;
+                if (spent)
+                {
+                    if (_candleOutAnnounced.Add(id)) ScreenReader.Say("Uma vela apagou.", interrupt: false);
+                    _candleLowAnnounced.Remove(id);
+                }
+                else
+                {
+                    litCount++;
+                    _candleOutAnnounced.Remove(id);   // re-armed if it was refuelled
+                    float pct = peak > 0 ? (float)fuel / peak : 1f;
+                    if (pct <= 0.25f)
+                    {
+                        if (_candleLowAnnounced.Add(id)) ScreenReader.Say("Uma vela está acabando.", interrupt: false);
+                    }
+                    else _candleLowAnnounced.Remove(id);
+                }
+            }
+
+            // Delayed enter-check: candles exist but none are lit -> remind on entry.
+            if (_candleEnterCheckTime > 0f && Time.unscaledTime >= _candleEnterCheckTime)
+            {
+                _candleEnterCheckTime = -1f;
+                if (Main.DebugMode)
+                    DebugLogger.LogState($"Candle enter-check: cachedCandles={_cachedCandles.Length} withCrafter={candleCount} lit={litCount}");
+                if (candleCount > 0 && litCount == 0)
+                    ScreenReader.Say("Sem velas acesas nas mesas.", interrupt: false);
+            }
+        }
+
+        // --- DEV-ONLY tools (user asked to investigate; NOT for the final mod). F10 slows game time
+        // (each in-game hour takes ~10x longer) for calmer testing; F11 opens a spoken area-teleport
+        // menu (arrows to browse, Enter to go, Escape to close). ---
+        private void HandleDevKeys()
+        {
+            if (Input.GetKeyDown(KeyCode.F10))
+            {
+                try
+                {
+                    if (WorldTime.multiplierDevConsole > 0.5f)
+                    {
+                        WorldTime.multiplierDevConsole = 0.1f;
+                        ScreenReader.Announce("Tempo do jogo dez vezes mais lento.");
+                    }
+                    else
+                    {
+                        WorldTime.multiplierDevConsole = 1f;
+                        ScreenReader.Announce("Tempo do jogo normal.");
+                    }
+                }
+                catch { }
+            }
+
+            if (Input.GetKeyDown(KeyCode.F11)) OpenTeleportMenu();
+        }
+
+        // The teleport destinations offered by the F11 menu (dev tool). Named in PT; mapped to the
+        // game's Location enum. Uses the game's OWN travel (GetTravelZone(from,to).StartTravelZone),
+        // so the player lands at the passage entry point and the destination scene loads properly.
+        private static readonly (Location loc, string name)[] TeleportDests = new (Location, string)[]
+        {
+            (Location.Tavern, "Taverna"),
+            (Location.Farm, "Fazenda"),
+            (Location.FarmShop, "Loja da fazenda"),
+            (Location.BarnInterior, "Celeiro"),
+            (Location.Road, "Estrada"),
+            (Location.River, "Rio"),
+            (Location.Camp, "Acampamento"),
+            (Location.Forest, "Floresta"),
+            (Location.City, "Cidade"),
+            (Location.CityOutside, "Entrada da cidade"),
+            (Location.CityTavern, "Taverna da cidade"),
+            (Location.Blacksmith, "Ferraria"),
+            (Location.Sawmill, "Serraria"),
+            (Location.PetShop, "Pet shop"),
+            (Location.Quarry, "Pedreira"),
+            (Location.QuarryCave, "Caverna da pedreira"),
+            (Location.Mine, "Mina"),
+            (Location.Beach, "Praia"),
+            (Location.Port, "Porto"),
+            (Location.Bathhouse, "Casa de banho"),
+        };
+
+        private bool _teleportMenuOpen;
+        private int _teleportIndex;
+
+        private void OpenTeleportMenu()
+        {
+            _teleportMenuOpen = true;
+            _teleportIndex = 0;
+            ScreenReader.Announce($"Teletransporte, {TeleportDests.Length} áreas. Setas para escolher, Enter para ir, Escape para fechar. {TeleportDests[0].name}");
+        }
+
+        private void HandleTeleportMenuOpen()
+        {
+            if (Input.GetKeyDown(KeyCode.Escape) || Input.GetKeyDown(KeyCode.F11))
+            {
+                _teleportMenuOpen = false;
+                ScreenReader.Announce("Teletransporte fechado.");
+                return;
+            }
+            if (Input.GetKeyDown(KeyCode.DownArrow) || Input.GetKeyDown(KeyCode.RightArrow))
+            {
+                _teleportIndex = (_teleportIndex + 1) % TeleportDests.Length;
+                ScreenReader.Announce(TeleportDests[_teleportIndex].name);
+                return;
+            }
+            if (Input.GetKeyDown(KeyCode.UpArrow) || Input.GetKeyDown(KeyCode.LeftArrow))
+            {
+                _teleportIndex = (_teleportIndex - 1 + TeleportDests.Length) % TeleportDests.Length;
+                ScreenReader.Announce(TeleportDests[_teleportIndex].name);
+                return;
+            }
+            if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
+            {
+                var dest = TeleportDests[_teleportIndex];
+                _teleportMenuOpen = false;
+                TeleportToArea(dest.loc, dest.name);
+            }
+        }
+
+        private void TeleportToArea(Location target, string name)
+        {
+            Location current;
+            try { current = PlayerController.GetPlayer(1).LEOIMFNKFGA; }
+            catch { current = Location.None; }
+            if (current == target) { ScreenReader.Announce($"Você já está em {name}."); return; }
+
+            var mgr = TravelZonesManager.GGFJGHHHEJC;
+            if (mgr == null) { ScreenReader.Announce("Gerenciador de viagem indisponível."); return; }
+
+            TravelZone zone = null;
+            try { zone = mgr.GetTravelZone(current, target); } catch { }
+
+            // Fallback: any ALIVE zone (Unity null-check skips destroyed/unloaded ones) whose
+            // destination is the target. Only live zones are safe to start.
+            if (zone == null)
+            {
+                try
+                {
+                    foreach (var kv in mgr.allTravelZones)
+                    {
+                        if (kv.Value == null) continue;
+                        TravelZone z;
+                        if (kv.Value.TryGetValue(target, out z) && z != null) { zone = z; break; }
+                    }
+                }
+                catch { }
+            }
+
+            if (zone == null)
+            {
+                ScreenReader.Announce($"Não dá pra ir direto pra {name} daqui. Vá por uma área vizinha primeiro.");
+                return;
+            }
+
+            try { zone.StartTravelZone(1); ScreenReader.Announce($"Indo para {name}."); }
+            catch (System.Exception e) { MelonLoader.MelonLogger.Error($"dev teleport to {name}: {e}"); ScreenReader.Announce("Falha ao teletransportar."); }
         }
 
         // User wants money GAINS spoken with the coin type ("mais 42 cobre", "mais 1 ouro") instead
@@ -2048,6 +2293,21 @@ namespace TravellersRestAccess
                 if (Main.DebugMode) DebugLogger.LogState($"EventText announced: \"{txt}\"");
             }
             catch { }
+        }
+
+        private static string DayPt(Day d)
+        {
+            switch (d)
+            {
+                case Day.Mon: return "Segunda";
+                case Day.Tue: return "Terça";
+                case Day.Wed: return "Quarta";
+                case Day.Thurs: return "Quinta";
+                case Day.Fri: return "Sexta";
+                case Day.Sat: return "Sábado";
+                case Day.Sun: return "Domingo";
+                default: return d.ToString();
+            }
         }
 
         private static string SeasonPt(Season s)
@@ -4614,11 +4874,13 @@ namespace TravellersRestAccess
             // Round 112/113: crafting/serving stations the user wants under "Máquinas" - the drinks
             // table/dispenser, the barrels and the food prep table. Checked BEFORE Container, since
             // DrinkDispenser/BanquetBarrel ARE Containers but the user wants them as machines.
-            if (IsDrinkStation(placeable) != null
-                || placeable.GetComponent<NinjaPreparationTable>() != null || placeable.GetComponentInChildren<NinjaPreparationTable>() != null)
-            {
+            // User request: the drink dispensers (taps/kegs) get their OWN "Dispensadores" category,
+            // out of "Máquinas". The menu table (BarMenuManager) and the prep table stay in "Máquinas".
+            string ds = IsDrinkStation(placeable);
+            if (ds != null)
+                return ds == "Mesa de menu" ? "Máquinas" : "Dispensadores";
+            if (placeable.GetComponent<NinjaPreparationTable>() != null || placeable.GetComponentInChildren<NinjaPreparationTable>() != null)
                 return "Máquinas";
-            }
             if (placeable.GetComponent<Container>() != null) return "Containers";
             if (placeable.GetComponent<Crafter>() != null) return "Máquinas";
             string nm = placeable.gameObject.name.ToLowerInvariant();
@@ -4916,22 +5178,74 @@ namespace TravellersRestAccess
                 return "Mesa de menu";
             // Barrels FIRST: a ServiceBarrel CONTAINS a DrinkDispenser (confirmed: ServiceBarrel
             // .drinkDispenser), so a barrel GameObject has both - "Barril" is the more specific name.
-            if (placeable.GetComponent<ServiceBarrel>() != null || placeable.GetComponentInChildren<ServiceBarrel>() != null
-                || placeable.GetComponent<BanquetBarrel>() != null || placeable.GetComponentInChildren<BanquetBarrel>() != null)
-                return "Barril";
-            // Round 121: there are several drink dispensers - differentiate them by the drink they
-            // hold (lastDrink), since sighted players tell them apart by colour. Falls back to the
-            // dispenser id when empty.
+            // User request: number the kegs (Barril 1..N) and append the drink they hold when present.
+            var sb = placeable.GetComponent<ServiceBarrel>() ?? placeable.GetComponentInChildren<ServiceBarrel>();
+            var bb = placeable.GetComponent<BanquetBarrel>() ?? placeable.GetComponentInChildren<BanquetBarrel>();
+            if (sb != null || bb != null)
+            {
+                var kegDd = sb != null ? sb.drinkDispenser : null;
+                return DispenserLabel("Barril", kegDd);
+            }
+            // Counter TAPS vs kegs: DrinkDispenser.isBeerTap is TRUE for the fixed counter taps, FALSE
+            // for service barrels. User wants the taps called "Torneira" and numbered 1..N (per kind),
+            // with the drink name appended when one is loaded (else just the number).
             var dd = placeable.GetComponent<DrinkDispenser>() ?? placeable.GetComponentInChildren<DrinkDispenser>();
             if (dd != null)
+                return DispenserLabel(dd.isBeerTap ? "Torneira" : "Barril", dd);
+            if (placeable.GetComponent<DrinksTable>() != null || placeable.GetComponentInChildren<DrinksTable>() != null)
+                return "Torneira";
+            return null;
+        }
+
+        // Builds "<kind> N" (+ ", <drink>" when loaded). N is the dispenser's position among the
+        // dispensers of the SAME kind (tap vs keg), so counter taps read Torneira 1..N and kegs
+        // read Barril 1..N independently. Stable within a session (manager registration order).
+        private static string DispenserLabel(string kind, DrinkDispenser dd)
+        {
+            if (dd == null) return kind;
+            int n = DispenserNumber(dd);
+            string label = n > 0 ? $"{kind} {n}" : kind;
+            string drinkName = DispenserDrinkName(dd);
+            return !string.IsNullOrEmpty(drinkName) ? $"{label}, {drinkName}" : label;
+        }
+
+        // The drink currently in a dispenser. Prefer lastDrink (set when poured), but fall back to the
+        // slot contents: a freshly-filled keg has content in slots before lastDrink is ever set.
+        private static string DispenserDrinkName(DrinkDispenser dd)
+        {
+            try
             {
                 var drink = dd.lastDrink?.LHBPOPOIFLE();
-                string drinkName = drink != null ? drink.IABAKHPEOAF() : null;
-                return !string.IsNullOrEmpty(drinkName) ? $"Dispensador de bebidas, {drinkName}" : $"Dispensador de bebidas {dd.drinkDispenserId}";
+                if (drink != null) return drink.IABAKHPEOAF();
+                if (dd.slots != null)
+                    foreach (var s in dd.slots)
+                        if (s != null && s.itemInstance != null)
+                        {
+                            var it = s.itemInstance.LHBPOPOIFLE();
+                            if (it != null) return it.IABAKHPEOAF();
+                        }
             }
-            if (placeable.GetComponent<DrinksTable>() != null || placeable.GetComponentInChildren<DrinksTable>() != null)
-                return "Dispensador de bebidas";
+            catch { }
             return null;
+        }
+
+        // 1-based index of this dispenser among all dispensers of the same kind (isBeerTap).
+        private static int DispenserNumber(DrinkDispenser dd)
+        {
+            try
+            {
+                var all = DrinkDispensersManager.GGFJGHHHEJC?.allDrinkDispensers;
+                if (all == null) return 0;
+                int n = 0;
+                for (int i = 0; i < all.Count; i++)
+                {
+                    if (all[i] == null || all[i].isBeerTap != dd.isBeerTap) continue;
+                    n++;
+                    if (all[i] == dd) return n;
+                }
+            }
+            catch { }
+            return 0;
         }
 
         // Names an NPC the way the game does. DialogueNPCBase carries the actor/character
@@ -5113,12 +5427,46 @@ namespace TravellersRestAccess
             return null;
         }
 
+        // The first drink held in an aging barrel's slots (null if empty).
+        private static string AgingBarrelDrinkName(AgingBarrel barrel)
+        {
+            try
+            {
+                if (barrel.inputSlot == null) return null;
+                foreach (var slot in barrel.inputSlot)
+                {
+                    if (slot == null || slot.itemInstance == null) continue;
+                    var item = slot.itemInstance.LHBPOPOIFLE();
+                    string nm = item != null ? item.IABAKHPEOAF() : null;
+                    if (string.IsNullOrEmpty(nm)) continue;
+                    // User request: include the CURRENT aging level so they can tell same-type barrels
+                    // apart without opening each one. FoodInstance.GBCJNGADANM = aging rank (0..4).
+                    var food = slot.itemInstance as FoodInstance;
+                    return food != null ? $"{nm}, {KeyboardUINavigator.AgingLevelName(food.GBCJNGADANM)}" : nm;
+                }
+            }
+            catch { }
+            return null;
+        }
+
         private static string DescribePlaceable(Placeable placeable)
         {
             // Round 113: name the drink stations explicitly (before the itemSetup name, which is
             // either missing - "Mesa de Bebidas" had none - or the generic "Barril").
             string drinkName = IsDrinkStation(placeable);
             if (drinkName != null) return drinkName;
+
+            // Aging barrels (adega): user wants the DRINK NAME when the barrel holds one, and just the
+            // base name otherwise (the nav list's generic per-name numbering then turns the empty ones
+            // into "Barril de envelhecimento 1, 2, 3..."). Same rule they asked for on taps/kegs.
+            var aging = placeable.GetComponent<AgingBarrel>() ?? placeable.GetComponentInChildren<AgingBarrel>();
+            if (aging != null)
+            {
+                string baseName = placeable.itemSetup != null && placeable.itemSetup.item != null
+                    ? ItemDisplayName(placeable.itemSetup.item) : "Barril de envelhecimento";
+                string ad = AgingBarrelDrinkName(aging);
+                return !string.IsNullOrEmpty(ad) ? $"{baseName}, {ad}" : baseName;
+            }
 
             // User reported confusing/cryptic names ("dispenser de bebidas", "armário
             // grande, sei lá") from the GameObject-name heuristic. Placeable has a direct
@@ -6597,9 +6945,17 @@ namespace TravellersRestAccess
                 if (tr != null)
                 {
                     string tn = DroppedName(tr.droppedItems != null && tr.droppedItems.Length > 0 ? tr.droppedItems[0].item : null) ?? "Árvore";
-                    // Hardwoods need a better axe (Tree.toolLevelRequired) - surface it (user: "madeira
-                    // nobre não cortou, não sei se tem aviso").
-                    string act = tr.toolLevelRequired > 1 ? $"cortar, precisa de machado nível {tr.toolLevelRequired}" : "cortar";
+                    // Trees are chopped by proximity with an AXE EQUIPPED (Tree.OnHover requires the
+                    // selected item to be an Ax). If the player is holding something else (e.g. the mop
+                    // from hunting), chopping silently does nothing - so say WHY (user: "cortar árvore
+                    // não funciona, é bloqueado?"). Hardwoods also need a better axe (toolLevelRequired).
+                    string act;
+                    if (tr.canUseAx && ClassifyHeldTool() != ToolKind.Axe)
+                        act = "precisa de machado equipado";
+                    else if (tr.toolLevelRequired > 1)
+                        act = $"cortar, precisa de machado nível {tr.toolLevelRequired}";
+                    else
+                        act = "cortar";
                     return ($"{tn}, {act}", go.transform.position);
                 }
                 // A planted crop (Harvestable with a cropSetter) - name it by the crop + "colher"
